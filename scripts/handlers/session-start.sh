@@ -36,7 +36,7 @@ MESSAGES_DIR="$HIVEMIND_DIR/messages"
 LOCKS_DIR="$HIVEMIND_DIR/locks"
 
 # Create directories if they don't exist
-mkdir -p "$AGENTS_DIR" "$SESSIONS_DIR" "$MESSAGES_DIR/broadcast" "$LOCKS_DIR"
+mkdir -p "$AGENTS_DIR" "$SESSIONS_DIR" "$MESSAGES_DIR" "$LOCKS_DIR"
 
 # Check if this session already has an agent assigned
 if [ -f "$SESSIONS_DIR/$SESSION_ID.txt" ]; then

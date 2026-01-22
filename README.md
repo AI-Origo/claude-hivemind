@@ -89,4 +89,4 @@ rm -rf .hivemind/sessions/*
 
 **Messages not appearing**
 
-Use `/hive read` (or `hive_read_messages`) to read your inbox. Messages persist until explicitly read and consumed. Direct messages are deleted after reading; broadcast messages are marked as read.
+Use `/hive read` (or `hive_read_messages`) to read your inbox. Messages persist until explicitly read and consumed. Messages are deleted after reading.

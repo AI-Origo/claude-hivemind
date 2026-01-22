@@ -4,8 +4,7 @@
 # On UserPromptSubmit:
 # 1. Look up this agent's codename via session mapping
 # 2. Check inbox for unread messages
-# 3. Check broadcast folder for unread messages
-# 4. Inject identity and messages as context
+# 3. Inject identity and messages as context
 
 set -uo pipefail
 
@@ -62,38 +61,6 @@ if [ -d "$INBOX_DIR" ]; then
     MESSAGES="${MESSAGES}${priority_prefix}[HIVE AGENT MESSAGE] From $from ($ts): $body"
 
     PROCESSED_FILES="$PROCESSED_FILES $msg_file"
-  done
-fi
-
-# Check broadcast messages
-BROADCAST_DIR="$MESSAGES_DIR/broadcast"
-if [ -d "$BROADCAST_DIR" ]; then
-  for msg_file in "$BROADCAST_DIR"/*.json; do
-    [ -f "$msg_file" ] || continue
-
-    # Check if we've already read this broadcast
-    read_by=$(jq -r '.readBy // []' "$msg_file" 2>/dev/null || echo "[]")
-    if echo "$read_by" | jq -e --arg name "$AGENT_NAME" 'index($name) != null' > /dev/null 2>&1; then
-      continue
-    fi
-
-    from=$(jq -r '.from // "unknown"' "$msg_file" 2>/dev/null || echo "unknown")
-    body=$(jq -r '.body // ""' "$msg_file" 2>/dev/null || echo "")
-    priority=$(jq -r '.priority // "normal"' "$msg_file" 2>/dev/null || echo "normal")
-
-    priority_prefix=""
-    [ "$priority" = "urgent" ] && priority_prefix="[URGENT] "
-    [ "$priority" = "high" ] && priority_prefix="[HIGH] "
-
-    ts=$(jq -r '.timestamp // ""' "$msg_file" 2>/dev/null || echo "")
-
-    if [ -n "$MESSAGES" ]; then
-      MESSAGES="$MESSAGES\\n"
-    fi
-    MESSAGES="${MESSAGES}${priority_prefix}[HIVE AGENT MESSAGE] [BROADCAST] From $from ($ts): $body"
-
-    # Mark this broadcast as read by us
-    jq --arg name "$AGENT_NAME" '.readBy = (.readBy // []) + [$name]' "$msg_file" > "$msg_file.tmp" && mv "$msg_file.tmp" "$msg_file"
   done
 fi
 
