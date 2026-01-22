@@ -1,0 +1,13 @@
+{
+  "name": "hivemind",
+  "version": "1.0.0",
+  "description": "Multi-agent coordination for Claude Code - track agents, share messages, prevent conflicts",
+  "author": {
+    "name": "AI Origo",
+    "url": "https://github.com/AI-Origo"
+  },
+  "repository": "https://github.com/AI-Origo/claude-hivemind",
+  "license": "MIT",
+  "keywords": ["multi-agent", "coordination", "hivemind", "orchestration"],
+  "skills": "./skills/"
+}

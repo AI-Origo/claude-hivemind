@@ -1,0 +1,9 @@
+{
+  "hivemind": {
+    "command": "bash",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.sh"],
+    "env": {
+      "HIVEMIND_DIR": ".hivemind"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+#!/bin/bash
+# hivemind - Launch Claude Code with Hivemind multi-agent coordination
+#
+# Usage:
+#   hivemind [claude options...]
+#
+# Examples:
+#   hivemind                     # Start in current directory
+#   hivemind /path/to/project    # Start in specific project
+#   hivemind --model opus        # Use specific model
+#   hivemind --resume            # Resume previous session
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+exec claude --plugin-dir "$SCRIPT_DIR" "$@"
