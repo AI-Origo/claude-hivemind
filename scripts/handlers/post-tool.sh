@@ -1,10 +1,9 @@
 #!/bin/bash
-# post-tool.sh - Track changes and update heartbeat after Write/Edit
+# post-tool.sh - Track changes after Write/Edit
 #
 # On PostToolUse (Write/Edit):
 # 1. Append entry to changelog
-# 2. Update agent's heartbeat
-# 3. Release file lock
+# 2. Release file lock
 
 set -euo pipefail
 
@@ -30,7 +29,6 @@ fi
 # Coordination directories
 HIVEMIND_DIR="$WORKING_DIR/.hivemind"
 SESSIONS_DIR="$HIVEMIND_DIR/sessions"
-AGENTS_DIR="$HIVEMIND_DIR/agents"
 LOCKS_DIR="$HIVEMIND_DIR/locks"
 CHANGELOG="$HIVEMIND_DIR/changelog.jsonl"
 
@@ -56,7 +54,7 @@ fi
 
 # Generate summary based on tool result
 SUMMARY=""
-if echo "$TOOL_RESULT" | grep -qi "created"; then
+if [ "$TOOL_NAME" = "Write" ] && echo "$TOOL_RESULT" | grep -qi "created"; then
   SUMMARY="Created file"
   ACTION="create"
 elif echo "$TOOL_RESULT" | grep -qi "updated\|modified\|edited"; then
@@ -73,12 +71,6 @@ CHANGELOG_ENTRY=$(jq -n \
   '{timestamp: $ts, agent: $agent, action: $action, file: $file, summary: $summary}')
 
 echo "$CHANGELOG_ENTRY" >> "$CHANGELOG"
-
-# Update agent heartbeat
-AGENT_FILE="$AGENTS_DIR/$AGENT_NAME.json"
-if [ -f "$AGENT_FILE" ]; then
-  jq --arg ts "$NOW" '.lastHeartbeat = $ts' "$AGENT_FILE" > "$AGENT_FILE.tmp" && mv "$AGENT_FILE.tmp" "$AGENT_FILE"
-fi
 
 # Release file lock
 LOCK_HASH=$(echo -n "$REL_PATH" | md5sum 2>/dev/null | cut -d' ' -f1 || \

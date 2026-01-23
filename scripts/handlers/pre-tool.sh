@@ -64,14 +64,13 @@ if [ -n "$AGENT_NAME" ]; then
       FROM=$(jq -r '.from // "unknown"' "$msg_file" 2>/dev/null)
       TIMESTAMP=$(jq -r '.timestamp // ""' "$msg_file" 2>/dev/null)
       CONTENT=$(jq -r '.body // ""' "$msg_file" 2>/dev/null)
-      URGENT=$(jq -r '.urgent // false' "$msg_file" 2>/dev/null)
+      PRIORITY=$(jq -r '.priority // "normal"' "$msg_file" 2>/dev/null)
 
-      URGENT_PREFIX=""
-      if [ "$URGENT" = "true" ]; then
-        URGENT_PREFIX="[URGENT] "
-      fi
+      PRIORITY_PREFIX=""
+      [ "$PRIORITY" = "urgent" ] && PRIORITY_PREFIX="[URGENT] "
+      [ "$PRIORITY" = "high" ] && PRIORITY_PREFIX="[HIGH] "
 
-      MESSAGES_OUTPUT="${MESSAGES_OUTPUT}${URGENT_PREFIX}[HIVE AGENT MESSAGE] From ${FROM} (${TIMESTAMP}): ${CONTENT}\n"
+      MESSAGES_OUTPUT="${MESSAGES_OUTPUT}${PRIORITY_PREFIX}[HIVE AGENT MESSAGE] From ${FROM} (${TIMESTAMP}): ${CONTENT}\n"
 
       # Consume (delete) the message after reading
       rm -f "$msg_file"
@@ -115,13 +114,13 @@ if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
     for agent_file in "$AGENTS_DIR"/*.json; do
       [ -f "$agent_file" ] || continue
 
-      OTHER_NAME=$(jq -r '.name // empty' "$agent_file" 2>/dev/null)
+      OTHER_NAME=$(jq -r '.sessionName // empty' "$agent_file" 2>/dev/null)
       # Skip self
       if [ "$OTHER_NAME" = "$AGENT_NAME" ]; then
         continue
       fi
 
-      OTHER_TASK=$(jq -r '.task // empty' "$agent_file" 2>/dev/null)
+      OTHER_TASK=$(jq -r '.currentTask // empty' "$agent_file" 2>/dev/null)
       OTHER_FILES=$(jq -r '.workingOn // [] | join(", ")' "$agent_file" 2>/dev/null)
 
       # Include agents that have a task set (busy)
@@ -152,7 +151,7 @@ if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
   # Output combined message if there's anything to say
   if [ -n "$COMBINED_OUTPUT" ]; then
     # Escape for JSON and use printf -v to handle newlines
-    ESCAPED_OUTPUT=$(printf '%s' "$COMBINED_OUTPUT" | sed 's/"/\\"/g' | sed 's/\\n/\\n/g')
+    ESCAPED_OUTPUT=$(printf '%s' "$COMBINED_OUTPUT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
     printf '{"message": "%s"}' "$ESCAPED_OUTPUT"
   fi
   exit 0
@@ -160,14 +159,14 @@ fi
 
 # Handle hivemind tools that need session_id injection
 # These tools need to know which agent is calling
-if [[ "$TOOL_NAME" == *"hive_whoami"* ]] || [[ "$TOOL_NAME" == *"hive_task"* ]] || [[ "$TOOL_NAME" == *"hive_message"* ]] || [[ "$TOOL_NAME" == *"hive_read_messages"* ]]; then
+if [[ "$TOOL_NAME" == *"hive_whoami"* ]] || [[ "$TOOL_NAME" == *"hive_task"* ]] || [[ "$TOOL_NAME" == *"hive_message"* ]]; then
   # Merge existing tool_input with session_id (preserves user-provided parameters)
   TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // {}')
 
   # Build output with session_id injection
   if [ -n "$DELIVERY_OUTPUT" ]; then
     # Include messages in the output
-    ESCAPED_MSG=$(printf '%s' "$DELIVERY_OUTPUT" | sed 's/"/\\"/g' | sed 's/\\n/\\n/g')
+    ESCAPED_MSG=$(printf '%s' "$DELIVERY_OUTPUT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
     OUTPUT=$(echo "$TOOL_INPUT" | jq -c \
       --arg sid "$SESSION_ID" \
       --arg msg "$ESCAPED_MSG" \
@@ -190,7 +189,7 @@ fi
 if [ -z "$FILE_PATH" ] || { [ "$TOOL_NAME" != "Write" ] && [ "$TOOL_NAME" != "Edit" ]; }; then
   # Deliver any pending messages for non-Write/Edit tools
   if [ -n "$DELIVERY_OUTPUT" ]; then
-    ESCAPED_MSG=$(printf '%s' "$DELIVERY_OUTPUT" | sed 's/"/\\"/g' | sed 's/\\n/\\n/g')
+    ESCAPED_MSG=$(printf '%s' "$DELIVERY_OUTPUT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
     printf '{"message": "%s"}' "$ESCAPED_MSG"
   fi
   exit 0
@@ -205,7 +204,7 @@ mkdir -p "$LOCKS_DIR"
 # If no agent name, deliver messages and exit
 if [ -z "$AGENT_NAME" ]; then
   if [ -n "$DELIVERY_OUTPUT" ]; then
-    ESCAPED_MSG=$(printf '%s' "$DELIVERY_OUTPUT" | sed 's/"/\\"/g' | sed 's/\\n/\\n/g')
+    ESCAPED_MSG=$(printf '%s' "$DELIVERY_OUTPUT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
     printf '{"message": "%s"}' "$ESCAPED_MSG"
   fi
   exit 0
@@ -265,7 +264,7 @@ fi
 
 # Output combined message if there's anything to say
 if [ -n "$FINAL_OUTPUT" ]; then
-  ESCAPED_OUTPUT=$(printf '%s' "$FINAL_OUTPUT" | sed 's/"/\\"/g' | sed 's/\\n/\\n/g')
+  ESCAPED_OUTPUT=$(printf '%s' "$FINAL_OUTPUT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
   printf '{"message": "%s"}' "$ESCAPED_OUTPUT"
 fi
 

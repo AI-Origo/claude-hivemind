@@ -71,10 +71,15 @@ if [ -n "$PROCESSED_FILES" ]; then
   done
 fi
 
-# Only output when there are messages (plain text, not JSON)
+# Output messages if any
 if [ -n "$MESSAGES" ]; then
   echo "[HIVEMIND MESSAGES]"
   echo -e "$MESSAGES"
+  echo ""
 fi
+
+# Always inject task recording reminder
+echo "[HIVEMIND TASK TRACKING]"
+echo "You are agent $AGENT_NAME. Record your current task using hive_task so other agents can see what you're working on. When you finish processing or are waiting for user input, clear your task by calling hive_task with an empty description - never set it to 'idle', 'waiting', or similar."
 
 exit 0
