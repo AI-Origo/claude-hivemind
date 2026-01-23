@@ -51,7 +51,7 @@ on run argv
         return "Error: Session with TTY " & targetTTY & " not found"
     end if
 
-    -- Retry loop: activate iTerm and verify focus before sending keystrokes
+    -- Retry loop: activate iTerm, verify correct session is focused, then send keystrokes
     set maxRetries to 5
     set retryCount to 0
     set success to false
@@ -59,8 +59,27 @@ on run argv
     repeat while retryCount < maxRetries and not success
         set retryCount to retryCount + 1
 
-        -- Activate iTerm
+        -- Select the target session and activate its window
         tell application "iTerm"
+            set windowCount to count of windows
+            repeat with w from 1 to windowCount
+                set theWindow to window w
+                set tabCount to count of tabs of theWindow
+                repeat with t from 1 to tabCount
+                    set theTab to tab t of theWindow
+                    set sessionCount to count of sessions of theTab
+                    repeat with s from 1 to sessionCount
+                        try
+                            set theSession to session s of theTab
+                            if tty of theSession is targetTTY then
+                                select theSession
+                                set index of theWindow to 1
+                                exit repeat
+                            end if
+                        end try
+                    end repeat
+                end repeat
+            end repeat
             activate
         end tell
 
@@ -72,29 +91,41 @@ on run argv
             set frontApp to name of first application process whose frontmost is true
         end tell
 
-        if frontApp is "iTerm2" then
-            -- Additional delay to ensure window is ready
-            delay 0.1
-
-            -- Send keystrokes
-            tell application "System Events"
-                tell process "iTerm2"
-                    keystroke messageText
-                    delay 0.1
-                    keystroke return
-                end tell
-            end tell
-
-            set success to true
-        else
+        if frontApp is not "iTerm2" then
             -- iTerm not focused, wait and retry
             delay 0.3
+        else
+            -- Verify the correct session (by TTY) is now active
+            set currentTTY to ""
+            try
+                tell application "iTerm"
+                    set currentTTY to tty of current session of current window
+                end tell
+            end try
+
+            if currentTTY is targetTTY then
+                -- Correct session is focused, send keystrokes
+                delay 0.1
+
+                tell application "System Events"
+                    tell process "iTerm2"
+                        keystroke messageText
+                        delay 0.1
+                        keystroke return
+                    end tell
+                end tell
+
+                set success to true
+            else
+                -- Wrong session focused, wait and retry
+                delay 0.3
+            end if
         end if
     end repeat
 
     if success then
         return "Message sent to " & targetTTY & " (attempts: " & retryCount & ")"
     else
-        return "Error: Failed to focus iTerm2 after " & maxRetries & " attempts"
+        return "Error: Failed to focus session " & targetTTY & " after " & maxRetries & " attempts"
     end if
 end run
