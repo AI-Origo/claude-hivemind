@@ -13,6 +13,10 @@
 
 set -u
 
+# Get the script directory for finding utils
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WAKE_SCRIPT="$SCRIPT_DIR/../scripts/utils/wake-agent.sh"
+
 AGENT_NAMES=(
   alfa bravo charlie delta echo foxtrot golf hotel
   india juliet kilo lima mike november oscar papa
@@ -92,7 +96,7 @@ claim_agent_name() {
     # Create agent file (only if we're claiming a new name)
     local now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     cat > "$AGENTS_DIR/$claimed_name.json" << EOF
-{"sessionName":"$claimed_name","sessionId":"mcp-$$","startedAt":"$now","lastHeartbeat":"$now","currentTask":"","workingOn":[],"status":"active"}
+{"sessionName":"$claimed_name","sessionId":"mcp-$$","startedAt":"$now","currentTask":"","workingOn":[]}
 EOF
     mkdir -p "$MESSAGES_DIR/inbox-$claimed_name"
   fi
@@ -127,6 +131,52 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# Check agent status based on task
+# Returns: "idle" (no task), "active" (has task), or "offline" (no agent file)
+get_agent_status() {
+  local target_agent="$1"
+  local agent_file="$AGENTS_DIR/$target_agent.json"
+
+  if [[ ! -f "$agent_file" ]]; then
+    echo "offline"
+    return
+  fi
+
+  local current_task=$(jq -r '.currentTask // ""' "$agent_file")
+  if [[ -z "$current_task" ]]; then
+    echo "idle"
+  else
+    echo "active"
+  fi
+}
+
+# Wake an idle agent by sending a keystroke to their iTerm2 session
+# Only wakes if the agent has a TTY registered and the wake script exists
+wake_agent() {
+  local target_agent="$1"
+  local agent_file="$AGENTS_DIR/$target_agent.json"
+
+  if [[ ! -f "$agent_file" ]]; then
+    log "wake_agent: agent file not found for $target_agent"
+    return 1
+  fi
+
+  local agent_tty=$(jq -r '.tty // ""' "$agent_file")
+  if [[ -z "$agent_tty" ]]; then
+    log "wake_agent: no TTY registered for $target_agent"
+    return 1
+  fi
+
+  if [[ ! -x "$WAKE_SCRIPT" ]]; then
+    log "wake_agent: wake script not found or not executable: $WAKE_SCRIPT"
+    return 1
+  fi
+
+  log "wake_agent: waking $target_agent at $agent_tty"
+  "$WAKE_SCRIPT" "$agent_tty" >/dev/null 2>&1 &
+  return 0
+}
 
 send_response() {
   local id="$1" result="$2"
@@ -303,7 +353,21 @@ tool_message() {
           --arg ts "$now" --arg body "$body" \
           '{id:$id,from:$from,to:$to,timestamp:$ts,body:$body}' \
           > "$MESSAGES_DIR/inbox-$target/$msg_id.json"
-    text_result "Message sent to $target: \"$body\""
+
+    # Check recipient status and report accordingly
+    local recipient_status=$(get_agent_status "$target")
+    if [[ "$recipient_status" == "idle" ]]; then
+      # Wake the idle agent
+      if wake_agent "$target"; then
+        text_result "Message sent to $target (idle - waking agent): \"$body\""
+      else
+        text_result "Message sent to $target (idle - will deliver on their next action): \"$body\""
+      fi
+    elif [[ "$recipient_status" == "offline" ]]; then
+      text_result "Message sent to $target (offline - will deliver when they reconnect): \"$body\""
+    else
+      text_result "Message sent to $target (active): \"$body\""
+    fi
   fi
 }
 
