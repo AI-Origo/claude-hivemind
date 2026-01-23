@@ -2,22 +2,45 @@
 
 Multi-agent coordination for Claude Code - track who's working where, send messages between agents, and avoid conflicts.
 
+## Notice
+
+This currently only works fully on MacOS and with iTerm2. This is due to the way user instructions need to be inserted into
+idle terminals as Claude Code does not offer a way to be woken up by an external event trigger.
+
+## Requirements
+
+- **Claude Code** CLI
+- **jq** for JSON processing
+- **macOS + iTerm2** (optional) - Required for agent wake-up feature. You need to explicitly keep agents "awake" otherwise.
+
 ## Quick Start
 
-1. Load the plugin:
-   ```bash
-   claude --plugin-dir /path/to/hivemind
-   ```
+### 1. Enable iTerm2 Automation (macOS only)
 
-2. Run your first command:
-   ```
-   /hive help
-   ```
+The agent wake-up feature uses AppleScript to send keystrokes to iTerm2. macOS requires permission for this:
 
-3. Add to `.gitignore`:
-   ```
-   .hivemind/
-   ```
+1. Open **System Settings** → **Privacy & Security** → **Accessibility**
+2. Enable access for **iTerm2** (add it if not listed)
+
+Alternatively, the first time the wake feature runs, macOS will prompt you to allow access - click "OK" to grant permission.
+
+### 2. Load the plugin
+
+```bash
+claude --plugin-dir /path/to/hivemind
+```
+
+### 3. Run your first command
+
+```
+/hive help
+```
+
+### 4. Add to `.gitignore`
+
+```
+.hivemind/
+```
 
 ## What is Hivemind?
 
@@ -26,6 +49,7 @@ Hivemind enables multiple Claude Code agents to work together on the same codeba
 **Key Features:**
 - **Automatic agent registration** - Each session gets a unique phonetic codename (alfa, bravo, charlie...)
 - **Inter-agent messaging** - Send direct messages or broadcast to all agents
+- **Agent wake-up** - Idle agents are automatically woken when they receive a message (macOS + iTerm2)
 - **Task tracking** - Set what you're working on so others know
 - **File change logging** - See who changed what and when
 - **Conflict warnings** - Advisory warnings when editing files another agent is working on
@@ -228,6 +252,25 @@ Messages are delivered automatically when you submit a prompt. You'll see them a
 
 Messages are consumed after delivery (deleted from inbox).
 
+### Agent Wake-Up (macOS + iTerm2)
+
+When you send a message to an idle agent (one with no current task), Hivemind automatically wakes them up:
+
+```
+> /hive message bravo Need your help with the API design
+
+Message sent to bravo (idle - waking agent): "Need your help with the API design"
+```
+
+The idle agent's terminal receives "Task incoming, please complete the delegated task." which triggers Claude to check for pending messages.
+
+**Requirements:**
+- macOS with iTerm2
+- iTerm2 automation permissions enabled (see Quick Start)
+- Both agents running in iTerm2 tabs/windows
+
+**Important:** After waking an agent, verify ~10 seconds later that they started working on the delegated task. If not, try waking them again. The wake mechanism can occasionally fail silently, so repeat until all delegated tasks are being actively worked on.
+
 ### File Conflict Warnings
 
 When you try to edit a file that another agent is working on:
@@ -247,7 +290,7 @@ Hivemind is a Claude Code plugin with three components:
 1. **MCP Server** (`mcp/server.sh`) - Provides tools: `hive_whoami`, `hive_agents`, `hive_status`, `hive_message`, `hive_task`, `hive_changes`, `hive_help`
 
 2. **Hooks** (`hooks/hooks.json`) - Intercept session and tool events:
-   - `SessionStart` - Register agent
+   - `SessionStart` - Register agent, capture TTY
    - `SessionEnd` - Cleanup agent
    - `UserPromptSubmit` - Deliver messages
    - `PreToolUse` - File lock warnings, session ID injection
@@ -255,28 +298,34 @@ Hivemind is a Claude Code plugin with three components:
 
 3. **Skill** (`skills/hive/SKILL.md`) - Maps `/hive` commands to MCP tools
 
+4. **Wake Utilities** (`scripts/utils/`) - AppleScript and bash wrapper for waking idle agents
+
 ### Agent Lifecycle
 
 **SessionStart:**
 1. Finds first available phonetic codename (alfa, bravo, charlie...)
-2. Creates agent registry entry in `.hivemind/agents/<name>.json`
-3. Maps session ID to codename in `.hivemind/sessions/`
-4. Creates inbox directory for messages
-5. Outputs context about other active agents
+2. Captures agent's TTY for wake-up feature
+3. Creates agent registry entry in `.hivemind/agents/<name>.json`
+4. Maps session ID to codename in `.hivemind/sessions/`
+5. Creates inbox directory for messages
+6. Outputs context about other active agents
 
 **SessionEnd:**
 1. Looks up codename from session mapping
 2. Removes agent registry entry (frees codename for reuse)
-3. Cleans up any file locks held by this agent
-4. Removes session mapping
+3. Removes session mapping
+4. Cleans up any file locks held by this agent
+5. Deletes agent's inbox and all messages
+6. If no agents remain, removes entire `.hivemind` directory
 
 ### Message Delivery
 
 1. Sender calls `hive_message` with target and body
 2. Message stored as JSON in target's inbox: `.hivemind/messages/inbox-<target>/`
-3. On next `UserPromptSubmit`, recipient's hook checks inbox
-4. Messages injected into context with `[HIVE AGENT MESSAGE]` prefix
-5. Messages deleted after delivery (consumed)
+3. If target is idle and has a TTY, wake script is triggered (macOS only)
+4. On next `UserPromptSubmit`, recipient's hook checks inbox
+5. Messages injected into context with `[HIVE AGENT MESSAGE]` prefix
+6. Messages deleted after delivery (consumed)
 
 For broadcasts (`target: "all"`), individual messages are created in each agent's inbox.
 
@@ -320,6 +369,7 @@ For broadcasts (`target: "all"`), individual messages are created in each agent'
   "lastHeartbeat": "2025-01-22T14:35:00Z",
   "currentTask": "Implementing auth",
   "workingOn": ["src/auth.ts"],
+  "tty": "/dev/ttys007",
   "status": "active"
 }
 ```
@@ -346,6 +396,20 @@ For broadcasts (`target: "all"`), individual messages are created in each agent'
 ```
 
 ## Troubleshooting
+
+### Agent wake-up not working
+
+The wake-up feature requires macOS + iTerm2 with automation permissions:
+
+1. Ensure you're using iTerm2 (not Terminal.app or other terminals)
+2. Check that iTerm2 has automation permissions in **System Settings** → **Privacy & Security** → **Automation**
+3. Verify the agent has a TTY registered: `cat .hivemind/agents/<name>.json | jq .tty`
+4. Check the debug log: `tail /tmp/hivemind-mcp-debug.log`
+
+If permissions are missing, you can trigger the macOS prompt by running:
+```bash
+osascript scripts/utils/send-keystroke.scpt /dev/ttys000 "test"
+```
 
 ### Stale agents showing
 
