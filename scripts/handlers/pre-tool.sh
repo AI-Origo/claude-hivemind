@@ -240,7 +240,7 @@ if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
 
   # Add idle agent guidance if any are available
   if [ $IDLE_COUNT -gt 0 ]; then
-    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND DELEGATION] The following agent(s) are idle and available for delegation:\n${IDLE_AGENTS}\nDelegation rules:\n1. DELEGATE ONE TASK AT A TIME: Research what's needed, then assign to one agent. Wait for their acknowledgment or questions before moving to the next delegation. Do not bulk-assign multiple tasks.\n2. AFTER DELEGATING: If you have delegated work and have nothing else to do, clear your task (hive_task with empty description) and STOP. You will be woken up when agents report back. Do NOT poll or pester agents for status updates.\n3. CONTEXT IS KEY: Include file paths, implementation details, and decisions so agents can start immediately.\n\n"
+    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND DELEGATION] The following agent(s) are idle and available for delegation:\n${IDLE_AGENTS}\nDelegation rules:\n1. DELEGATE EARLY: If your plan involves work that can be parallelized, delegate to idle agents AS SOON AS POSSIBLE so work proceeds concurrently. Do not wait until you've finished your own tasks.\n2. ONE TASK AT A TIME: Research what's needed, then assign to one agent. Wait for their acknowledgment or questions before the next delegation. Do not bulk-assign.\n3. AFTER DELEGATING: If you have delegated work and have nothing else to do, clear your task (hive_task with empty description) and STOP. You will be woken up when agents report back. Do NOT poll or pester for status.\n4. CONTEXT IS KEY: Include file paths, implementation details, and decisions so agents can start immediately.\n\n"
   fi
 
   # Output combined message if there's anything to say

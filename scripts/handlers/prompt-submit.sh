@@ -151,6 +151,6 @@ echo "[HIVEMIND TASK TRACKING]"
 echo "You are agent $AGENT_NAME. Record your current task using hive_task so other agents can see what you're working on. When you finish processing or are waiting for user input, clear your task by calling hive_task with an empty description - never set it to 'idle', 'waiting', or similar."
 echo ""
 echo "[HIVEMIND DELEGATION PROTOCOL]"
-echo "When delegating work to other agents: (1) Assign ONE task at a time - research what's needed, assign it, wait for acknowledgment before the next. Do NOT bulk-assign. (2) After delegating, if you have no other work, clear your task and STOP. You will be woken up when agents report back. Do NOT poll or pester for status."
+echo "When delegating work to other agents: (1) DELEGATE EARLY - If your plan involves work that can be parallelized, delegate to idle agents as soon as possible so work proceeds concurrently. (2) Assign ONE task at a time - research what's needed, assign it, wait for acknowledgment before the next. Do NOT bulk-assign. (3) After delegating, if you have no other work, clear your task and STOP. You will be woken up when agents report back. Do NOT poll or pester for status."
 
 exit 0
