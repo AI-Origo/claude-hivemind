@@ -359,7 +359,7 @@ tool_message() {
     if [[ "$recipient_status" == "idle" ]]; then
       # Wake the idle agent
       if wake_agent "$target"; then
-        text_result "Message sent to $target (idle - waking agent): \"$body\""
+        text_result "Message sent to $target (idle - waking agent): \"$body\". IMPORTANT: Verify in ~10 seconds that they started working on the task. If not, send another message to wake them again. Repeat until all delegated tasks are being actively worked on."
       else
         text_result "Message sent to $target (idle - will deliver on their next action): \"$body\""
       fi
