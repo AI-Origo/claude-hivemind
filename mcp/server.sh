@@ -27,10 +27,45 @@ AGENT_NAMES=(
 HIVEMIND_DIR="${HIVEMIND_DIR:-.hivemind}"
 AGENTS_DIR="$HIVEMIND_DIR/agents"
 SESSIONS_DIR="$HIVEMIND_DIR/sessions"
+TTY_SESSIONS_DIR="$HIVEMIND_DIR/tty-sessions"
 LOCKS_DIR="$HIVEMIND_DIR/locks"
 MESSAGES_DIR="$HIVEMIND_DIR/messages"
 CHANGELOG="$HIVEMIND_DIR/changelog.jsonl"
 MY_AGENT_NAME=""
+
+# Hash TTY path for safe filename
+hash_tty() {
+  local tty="$1"
+  echo -n "$tty" | md5 2>/dev/null || \
+  echo -n "$tty" | md5sum 2>/dev/null | cut -d' ' -f1 || \
+  echo -n "$tty" | shasum | cut -d' ' -f1
+}
+
+# Look up agent name using TTY first, then session_id
+lookup_agent_name() {
+  local tty="$1"
+  local session_id="$2"
+  local agent_name=""
+
+  # Try TTY mapping first (most stable)
+  if [[ -n "$tty" ]]; then
+    local tty_hash=$(hash_tty "$tty")
+    local tty_file="$TTY_SESSIONS_DIR/$tty_hash.txt"
+    if [[ -f "$tty_file" ]]; then
+      agent_name=$(cat "$tty_file")
+    fi
+  fi
+
+  # Fall back to session_id mapping
+  if [[ -z "$agent_name" && -n "$session_id" ]]; then
+    local session_file="$SESSIONS_DIR/$session_id.txt"
+    if [[ -f "$session_file" ]]; then
+      agent_name=$(cat "$session_file")
+    fi
+  fi
+
+  echo "$agent_name"
+}
 
 MCP_DEBUG_LOG="/tmp/hivemind-mcp-debug.log"
 log() {
@@ -196,9 +231,10 @@ text_result() {
 
 tool_whoami() {
   local session_id="$1"
-  local session_file="$SESSIONS_DIR/$session_id.txt"
-  if [[ -f "$session_file" ]]; then
-    text_result "$(cat "$session_file")"
+  local tty="$2"
+  local agent_name=$(lookup_agent_name "$tty" "$session_id")
+  if [[ -n "$agent_name" ]]; then
+    text_result "$agent_name"
   else
     text_result "Unknown session"
   fi
@@ -303,15 +339,14 @@ No changes recorded."
 }
 
 tool_message() {
-  local session_id="$1" target="$2" body="$3"
+  local session_id="$1" target="$2" body="$3" tty="$4"
   local now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   local msg_id="msg-$(date +%s)-$$-$RANDOM"
 
-  # Look up agent name from session
-  local session_file="$SESSIONS_DIR/$session_id.txt"
-  local from_agent="unknown"
-  if [[ -f "$session_file" ]]; then
-    from_agent=$(cat "$session_file")
+  # Look up agent name (TTY first, then session_id)
+  local from_agent=$(lookup_agent_name "$tty" "$session_id")
+  if [[ -z "$from_agent" ]]; then
+    from_agent="unknown"
   fi
 
   if [[ "$target" == "all" ]]; then
@@ -372,15 +407,14 @@ tool_message() {
 }
 
 tool_task() {
-  local session_id="$1" description="$2"
+  local session_id="$1" description="$2" tty="$3"
 
-  # Look up agent name from session
-  local session_file="$SESSIONS_DIR/$session_id.txt"
-  if [[ ! -f "$session_file" ]]; then
+  # Look up agent name (TTY first, then session_id)
+  local agent_name=$(lookup_agent_name "$tty" "$session_id")
+  if [[ -z "$agent_name" ]]; then
     text_result "Error: Unknown session"
     return
   fi
-  local agent_name=$(cat "$session_file")
 
   local agent_file="$AGENTS_DIR/$agent_name.json"
   if [[ ! -f "$agent_file" ]]; then
@@ -502,10 +536,11 @@ handle_tools_call() {
   case "$tool" in
     hive_whoami)
       local sid=$(echo "$args" | jq -r '.session_id // ""')
-      if [[ -z "$sid" ]]; then
-        send_error "$id" "-32602" "Missing session_id"
+      local tty=$(echo "$args" | jq -r '.tty // ""')
+      if [[ -z "$sid" && -z "$tty" ]]; then
+        send_error "$id" "-32602" "Missing session_id or tty"
       else
-        send_response "$id" "$(tool_whoami "$sid")"
+        send_response "$id" "$(tool_whoami "$sid" "$tty")"
       fi
       ;;
     hive_agents)  send_response "$id" "$(tool_agents)" ;;
@@ -514,27 +549,29 @@ handle_tools_call() {
     hive_message)
       log "hive_message called with args: $args"
       local sid=$(echo "$args" | jq -r '.session_id // ""')
+      local tty=$(echo "$args" | jq -r '.tty // ""')
       local target=$(echo "$args" | jq -r '.target // ""')
       local body=$(echo "$args" | jq -r '.body // ""')
-      log "hive_message parsed: sid='$sid' target='$target' body='$body'"
-      if [[ -z "$sid" ]]; then
-        log "hive_message ERROR: Missing session_id"
-        send_error "$id" "-32602" "Missing session_id"
+      log "hive_message parsed: sid='$sid' tty='$tty' target='$target' body='$body'"
+      if [[ -z "$sid" && -z "$tty" ]]; then
+        log "hive_message ERROR: Missing session_id and tty"
+        send_error "$id" "-32602" "Missing session_id or tty"
       elif [[ -z "$target" || -z "$body" ]]; then
         log "hive_message ERROR: Missing target or body"
         send_error "$id" "-32602" "Missing required parameters: target and body"
       else
         log "hive_message: calling tool_message"
-        send_response "$id" "$(tool_message "$sid" "$target" "$body")"
+        send_response "$id" "$(tool_message "$sid" "$target" "$body" "$tty")"
       fi
       ;;
     hive_task)
       local sid=$(echo "$args" | jq -r '.session_id // ""')
+      local tty=$(echo "$args" | jq -r '.tty // ""')
       local desc=$(echo "$args" | jq -r '.description // ""')
-      if [[ -z "$sid" ]]; then
-        send_error "$id" "-32602" "Missing session_id"
+      if [[ -z "$sid" && -z "$tty" ]]; then
+        send_error "$id" "-32602" "Missing session_id or tty"
       else
-        send_response "$id" "$(tool_task "$sid" "$desc")"
+        send_response "$id" "$(tool_task "$sid" "$desc" "$tty")"
       fi
       ;;
     hive_changes)

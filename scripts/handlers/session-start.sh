@@ -17,6 +17,14 @@ AGENT_NAMES=(
   xray yankee zulu
 )
 
+# Hash TTY path for safe filename
+hash_tty() {
+  local tty="$1"
+  echo -n "$tty" | md5 2>/dev/null || \
+  echo -n "$tty" | md5sum 2>/dev/null | cut -d' ' -f1 || \
+  echo -n "$tty" | shasum | cut -d' ' -f1
+}
+
 # Read input from stdin
 INPUT=$(cat)
 
@@ -32,11 +40,12 @@ fi
 HIVEMIND_DIR="$WORKING_DIR/.hivemind"
 AGENTS_DIR="$HIVEMIND_DIR/agents"
 SESSIONS_DIR="$HIVEMIND_DIR/sessions"
+TTY_SESSIONS_DIR="$HIVEMIND_DIR/tty-sessions"
 MESSAGES_DIR="$HIVEMIND_DIR/messages"
 LOCKS_DIR="$HIVEMIND_DIR/locks"
 
 # Create directories if they don't exist
-mkdir -p "$AGENTS_DIR" "$SESSIONS_DIR" "$MESSAGES_DIR" "$LOCKS_DIR"
+mkdir -p "$AGENTS_DIR" "$SESSIONS_DIR" "$TTY_SESSIONS_DIR" "$MESSAGES_DIR" "$LOCKS_DIR"
 
 # Determine agent's TTY
 # Try the tty command first, fall back to parent process lookup
@@ -82,12 +91,37 @@ else
     fi
   done
 
-  # If no MCP agent found, find first available codename
+  # If no MCP agent found, check for TTY-based recovery (ended agent in same terminal)
+  if [ -z "$ASSIGNED_NAME" ] && [[ -n "$AGENT_TTY" ]]; then
+    for agent_file in "$AGENTS_DIR"/*.json; do
+      [ -f "$agent_file" ] || continue
+      agent_name=$(basename "$agent_file" .json)
+      agent_tty=$(jq -r '.tty // ""' "$agent_file" 2>/dev/null)
+      agent_session_id=$(jq -r '.sessionId // ""' "$agent_file" 2>/dev/null)
+
+      # If same TTY and agent is ended (empty sessionId), reclaim it
+      if [[ "$agent_tty" == "$AGENT_TTY" && -z "$agent_session_id" ]]; then
+        ASSIGNED_NAME="$agent_name"
+        # Update agent file with new session ID, clear endedAt
+        jq --arg sid "$SESSION_ID" '.sessionId = $sid | del(.endedAt)' "$agent_file" > "$agent_file.tmp" \
+          && mv "$agent_file.tmp" "$agent_file"
+        ADOPTED_MCP_AGENT=true  # Reuse flag to skip creating new agent file
+        break
+      fi
+    done
+  fi
+
+  # If no ended agent found, find first available codename
   if [ -z "$ASSIGNED_NAME" ]; then
     for name in "${AGENT_NAMES[@]}"; do
       if [ ! -f "$AGENTS_DIR/$name.json" ]; then
         ASSIGNED_NAME="$name"
         break
+      else
+        # Check if this agent file is from an ended agent (we can reuse this name
+        # only if it's from a different TTY or has been ended for >24 hours)
+        # For now, skip files that exist - they may be reclaimed by their original terminal
+        continue
       fi
     done
   fi
@@ -113,6 +147,12 @@ EOF
 
   # Create session -> name mapping
   echo "$ASSIGNED_NAME" > "$SESSIONS_DIR/$SESSION_ID.txt"
+
+  # Also create TTY-based mapping for stable identity (survives session_id changes)
+  if [[ -n "$AGENT_TTY" ]]; then
+    TTY_HASH=$(hash_tty "$AGENT_TTY")
+    echo "$ASSIGNED_NAME" > "$TTY_SESSIONS_DIR/$TTY_HASH.txt"
+  fi
 
   # Create inbox directory for this agent
   mkdir -p "$MESSAGES_DIR/inbox-$ASSIGNED_NAME"

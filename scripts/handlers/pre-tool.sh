@@ -5,11 +5,78 @@
 # 1. Message delivery - check inbox and deliver messages (silent if none)
 #
 # Tool-specific handling:
+# - EnterPlanMode: Remind to set task as "Planning: <topic>"
 # - ExitPlanMode: Task tracking reminder + delegation guidance
 # - Hivemind tools: Session ID injection
 # - Write/Edit: File locking and conflict warnings
 
 set -euo pipefail
+
+# Find .hivemind directory by searching up from given path
+find_hivemind_dir() {
+  local dir="$1"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -d "$dir/.hivemind" ]]; then
+      echo "$dir/.hivemind"
+      return 0
+    fi
+    dir=$(dirname "$dir")
+  done
+  return 1
+}
+
+# Get current TTY from process hierarchy
+get_current_tty() {
+  local tty=""
+  if command -v tty &>/dev/null; then
+    tty=$(tty 2>/dev/null || true)
+  fi
+  if [[ -z "$tty" || "$tty" == "not a tty" ]]; then
+    local ppid=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+    if [[ -n "$ppid" ]]; then
+      tty=$(ps -o tty= -p "$ppid" 2>/dev/null | tr -d ' ')
+      [[ -n "$tty" && "$tty" != "??" ]] && tty="/dev/$tty"
+    fi
+  fi
+  [[ "$tty" == "not a tty" || "$tty" == "??" ]] && tty=""
+  echo "$tty"
+}
+
+# Hash TTY path for safe filename
+hash_tty() {
+  local tty="$1"
+  echo -n "$tty" | md5 2>/dev/null || \
+  echo -n "$tty" | md5sum 2>/dev/null | cut -d' ' -f1 || \
+  echo -n "$tty" | shasum | cut -d' ' -f1
+}
+
+# Look up agent name using TTY first, then session_id
+lookup_agent_name() {
+  local tty="$1"
+  local session_id="$2"
+  local tty_sessions_dir="$3"
+  local sessions_dir="$4"
+  local agent_name=""
+
+  # Try TTY mapping first (most stable)
+  if [[ -n "$tty" ]]; then
+    local tty_hash=$(hash_tty "$tty")
+    local tty_file="$tty_sessions_dir/$tty_hash.txt"
+    if [[ -f "$tty_file" ]]; then
+      agent_name=$(cat "$tty_file")
+    fi
+  fi
+
+  # Fall back to session_id mapping
+  if [[ -z "$agent_name" && -n "$session_id" ]]; then
+    local session_file="$sessions_dir/$session_id.txt"
+    if [[ -f "$session_file" ]]; then
+      agent_name=$(cat "$session_file")
+    fi
+  fi
+
+  echo "$agent_name"
+}
 
 # Debug log file
 DEBUG_LOG="${HIVEMIND_DEBUG_LOG:-/tmp/hivemind-pre-tool-debug.log}"
@@ -42,16 +109,20 @@ fi
 # ============================================================================
 # MESSAGE DELIVERY (runs for ALL tools, silent if no messages)
 # ============================================================================
-HIVEMIND_DIR="$WORKING_DIR/.hivemind"
+HIVEMIND_DIR=$(find_hivemind_dir "$WORKING_DIR")
+if [ -z "$HIVEMIND_DIR" ]; then
+  echo "EXIT: No .hivemind directory found" >> "$DEBUG_LOG"
+  exit 0
+fi
 SESSIONS_DIR="$HIVEMIND_DIR/sessions"
+TTY_SESSIONS_DIR="$HIVEMIND_DIR/tty-sessions"
 AGENTS_DIR="$HIVEMIND_DIR/agents"
 
-# Look up agent name for this session
-SESSION_FILE="$SESSIONS_DIR/$SESSION_ID.txt"
-AGENT_NAME=""
-if [ -f "$SESSION_FILE" ]; then
-  AGENT_NAME=$(cat "$SESSION_FILE")
-fi
+# Get TTY for stable identity lookup
+AGENT_TTY=$(get_current_tty)
+
+# Look up agent name (TTY first, then session_id)
+AGENT_NAME=$(lookup_agent_name "$AGENT_TTY" "$SESSION_ID" "$TTY_SESSIONS_DIR" "$SESSIONS_DIR")
 
 MESSAGES_OUTPUT=""
 if [ -n "$AGENT_NAME" ]; then
@@ -89,6 +160,30 @@ echo "Message delivery check: AGENT_NAME='$AGENT_NAME', MESSAGES_OUTPUT='$MESSAG
 # ============================================================================
 # TOOL-SPECIFIC HANDLING
 # ============================================================================
+
+# Handle EnterPlanMode - remind agent to set task as "Planning: <topic>"
+if [[ "$TOOL_NAME" == "EnterPlanMode" ]]; then
+  echo "ENTER PLAN MODE detected for agent $AGENT_NAME" >> "$DEBUG_LOG"
+
+  COMBINED_OUTPUT=""
+
+  # Add any pending messages first
+  if [ -n "$DELIVERY_OUTPUT" ]; then
+    COMBINED_OUTPUT="${DELIVERY_OUTPUT}"
+  fi
+
+  # Task tracking reminder for planning
+  if [ -n "$AGENT_NAME" ]; then
+    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND TASK TRACKING] Agent ${AGENT_NAME}: You are entering plan mode. Set your task to 'Planning: <short topic>' using hive_task so other agents know you are planning (e.g., 'Planning: auth refactor' or 'Planning: API endpoints').\n\n"
+  fi
+
+  # Output combined message if there's anything to say
+  if [ -n "$COMBINED_OUTPUT" ]; then
+    ESCAPED_OUTPUT=$(printf '%s' "$COMBINED_OUTPUT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+    printf '{"message": "%s"}' "$ESCAPED_OUTPUT"
+  fi
+  exit 0
+fi
 
 # Handle ExitPlanMode - remind agent to record task + show delegation guidance
 if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
@@ -145,7 +240,7 @@ if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
 
   # Add idle agent guidance if any are available
   if [ $IDLE_COUNT -gt 0 ]; then
-    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND DELEGATION] The following agent(s) are idle and available for delegation:\n${IDLE_AGENTS}Feel free to delegate subtasks to them using hive_message. When delegating, include all relevant context: file paths, implementation details, and any decisions you've already made so they can start immediately.\n\n"
+    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND DELEGATION] The following agent(s) are idle and available for delegation:\n${IDLE_AGENTS}\nDelegation rules:\n1. DELEGATE ONE TASK AT A TIME: Research what's needed, then assign to one agent. Wait for their acknowledgment or questions before moving to the next delegation. Do not bulk-assign multiple tasks.\n2. AFTER DELEGATING: If you have delegated work and have nothing else to do, clear your task (hive_task with empty description) and STOP. You will be woken up when agents report back. Do NOT poll or pester agents for status updates.\n3. CONTEXT IS KEY: Include file paths, implementation details, and decisions so agents can start immediately.\n\n"
   fi
 
   # Output combined message if there's anything to say
@@ -157,24 +252,26 @@ if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
   exit 0
 fi
 
-# Handle hivemind tools that need session_id injection
+# Handle hivemind tools that need session_id and tty injection
 # These tools need to know which agent is calling
 if [[ "$TOOL_NAME" == *"hive_whoami"* ]] || [[ "$TOOL_NAME" == *"hive_task"* ]] || [[ "$TOOL_NAME" == *"hive_message"* ]]; then
-  # Merge existing tool_input with session_id (preserves user-provided parameters)
+  # Merge existing tool_input with session_id and tty (preserves user-provided parameters)
   TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // {}')
 
-  # Build output with session_id injection
+  # Build output with session_id and tty injection
   if [ -n "$DELIVERY_OUTPUT" ]; then
     # Include messages in the output
     ESCAPED_MSG=$(printf '%s' "$DELIVERY_OUTPUT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
     OUTPUT=$(echo "$TOOL_INPUT" | jq -c \
       --arg sid "$SESSION_ID" \
+      --arg tty "$AGENT_TTY" \
       --arg msg "$ESCAPED_MSG" \
-      '{message:$msg,hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:(. + {session_id:$sid})}}')
+      '{message:$msg,hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:(. + {session_id:$sid,tty:$tty})}}')
   else
     OUTPUT=$(echo "$TOOL_INPUT" | jq -c \
       --arg sid "$SESSION_ID" \
-      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:(. + {session_id:$sid})}}')
+      --arg tty "$AGENT_TTY" \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:(. + {session_id:$sid,tty:$tty})}}')
   fi
 
   echo "TOOL_INPUT (original): $TOOL_INPUT" >> "$DEBUG_LOG"
