@@ -35,7 +35,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|mcp__plugin_hivemind_hivemind__hive_whoami|mcp__plugin_hivemind_hivemind__hive_task|mcp__plugin_hivemind_hivemind__hive_message",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",

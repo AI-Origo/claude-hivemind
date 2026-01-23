@@ -213,7 +213,7 @@ tool_agents() {
     [[ -f "$f" ]] || continue
     local name=$(jq -r '.sessionName' "$f")
     local task=$(jq -r '.currentTask // ""' "$f")
-    local status=$(jq -r '.status' "$f")
+    local status=$(get_agent_status "$name")
     local files=$(jq -r '.workingOn | if length > 0 then join(", ") else "(none)" end' "$f")
     output+="
 Agent: $name ($status)"

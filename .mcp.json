@@ -1,9 +1,11 @@
 {
-  "hivemind": {
-    "command": "bash",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.sh"],
-    "env": {
-      "HIVEMIND_DIR": ".hivemind"
+  "mcpServers": {
+    "hivemind": {
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.sh"],
+      "env": {
+        "HIVEMIND_DIR": ".hivemind"
+      }
     }
   }
 }

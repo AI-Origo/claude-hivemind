@@ -38,6 +38,24 @@ LOCKS_DIR="$HIVEMIND_DIR/locks"
 # Create directories if they don't exist
 mkdir -p "$AGENTS_DIR" "$SESSIONS_DIR" "$MESSAGES_DIR" "$LOCKS_DIR"
 
+# Determine agent's TTY
+# Try the tty command first, fall back to parent process lookup
+AGENT_TTY=""
+if command -v tty &>/dev/null; then
+  AGENT_TTY=$(tty 2>/dev/null || true)
+fi
+# If tty command failed or returned "not a tty", try parent process lookup
+if [[ -z "$AGENT_TTY" || "$AGENT_TTY" == "not a tty" ]]; then
+  # Look up TTY from parent process (Claude Code runs in the terminal)
+  PARENT_PID=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+  if [[ -n "$PARENT_PID" ]]; then
+    AGENT_TTY=$(ps -o tty= -p "$PARENT_PID" 2>/dev/null | tr -d ' ')
+    [[ -n "$AGENT_TTY" && "$AGENT_TTY" != "??" ]] && AGENT_TTY="/dev/$AGENT_TTY"
+  fi
+fi
+# Final fallback: empty string (no TTY available)
+[[ "$AGENT_TTY" == "not a tty" || "$AGENT_TTY" == "??" ]] && AGENT_TTY=""
+
 # Check if this session already has an agent assigned
 if [ -f "$SESSIONS_DIR/$SESSION_ID.txt" ]; then
   ASSIGNED_NAME=$(cat "$SESSIONS_DIR/$SESSION_ID.txt")
@@ -58,8 +76,8 @@ else
     if [[ "$agent_session_id" == mcp-* ]]; then
       ASSIGNED_NAME="$agent_name"
       ADOPTED_MCP_AGENT=true
-      # Update agent file with our Claude session ID
-      jq --arg sid "$SESSION_ID" '.sessionId = $sid' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
+      # Update agent file with our Claude session ID and TTY
+      jq --arg sid "$SESSION_ID" --arg tty "$AGENT_TTY" '.sessionId = $sid | .tty = $tty' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
       break
     fi
   done
@@ -86,10 +104,9 @@ else
   "sessionName": "$ASSIGNED_NAME",
   "sessionId": "$SESSION_ID",
   "startedAt": "$NOW",
-  "lastHeartbeat": "$NOW",
   "currentTask": "",
   "workingOn": [],
-  "status": "active"
+  "tty": "$AGENT_TTY"
 }
 EOF
   fi
