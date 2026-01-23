@@ -54,7 +54,15 @@ if [ -d "$LOCKS_DIR" ]; then
   done
 fi
 
-# Keep inbox - messages persist until explicitly read via hive_read_messages
-# (Previously deleted inbox here, but messages should survive session restarts)
+# Delete this agent's inbox and all messages
+rm -rf "$MESSAGES_DIR/inbox-$AGENT_NAME"
+
+# If no agents remain, clean up the entire hivemind directory
+if [ -d "$AGENTS_DIR" ]; then
+  remaining=$(ls -A "$AGENTS_DIR" 2>/dev/null | wc -l)
+  if [ "$remaining" -eq 0 ]; then
+    rm -rf "$HIVEMIND_DIR"
+  fi
+fi
 
 exit 0
