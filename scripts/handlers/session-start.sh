@@ -91,18 +91,18 @@ else
     fi
   done
 
-  # If no MCP agent found, check for TTY-based recovery (ended agent in same terminal)
+  # If no MCP agent found, check for TTY-based recovery (same terminal, any sessionId state)
+  # This handles: ended agents, AND session_id changes from /clear or context resets
   if [ -z "$ASSIGNED_NAME" ] && [[ -n "$AGENT_TTY" ]]; then
     for agent_file in "$AGENTS_DIR"/*.json; do
       [ -f "$agent_file" ] || continue
       agent_name=$(basename "$agent_file" .json)
       agent_tty=$(jq -r '.tty // ""' "$agent_file" 2>/dev/null)
-      agent_session_id=$(jq -r '.sessionId // ""' "$agent_file" 2>/dev/null)
 
-      # If same TTY and agent is ended (empty sessionId), reclaim it
-      if [[ "$agent_tty" == "$AGENT_TTY" && -z "$agent_session_id" ]]; then
+      # If same TTY, reclaim this agent (update sessionId to current)
+      if [[ "$agent_tty" == "$AGENT_TTY" ]]; then
         ASSIGNED_NAME="$agent_name"
-        # Update agent file with new session ID, clear endedAt
+        # Update agent file with new session ID, clear endedAt if present
         jq --arg sid "$SESSION_ID" '.sessionId = $sid | del(.endedAt)' "$agent_file" > "$agent_file.tmp" \
           && mv "$agent_file.tmp" "$agent_file"
         ADOPTED_MCP_AGENT=true  # Reuse flag to skip creating new agent file
