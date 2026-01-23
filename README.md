@@ -303,20 +303,27 @@ Hivemind is a Claude Code plugin with three components:
 ### Agent Lifecycle
 
 **SessionStart:**
-1. Finds first available phonetic codename (alfa, bravo, charlie...)
-2. Captures agent's TTY for wake-up feature
-3. Creates agent registry entry in `.hivemind/agents/<name>.json`
-4. Maps session ID to codename in `.hivemind/sessions/`
-5. Creates inbox directory for messages
-6. Outputs context about other active agents
+1. Checks if session ID already has an agent assigned
+2. If not, checks for TTY-based recovery (same terminal reuses existing agent)
+3. If no existing agent, finds first available phonetic codename (alfa, bravo, charlie...)
+4. Captures agent's TTY for wake-up feature and stable identification
+5. Creates agent registry entry in `.hivemind/agents/<name>.json`
+6. Maps session ID to codename in `.hivemind/sessions/`
+7. Maps TTY hash to codename in `.hivemind/tty-sessions/` (survives session ID changes)
+8. Creates inbox directory for messages
+9. Outputs context about other active agents
+
+**TTY-Based Identity:**
+
+Agent identity is tracked by TTY (terminal device path) in addition to session ID. This ensures agents maintain their identity even when Claude Code's session ID changes (which can happen on `/clear`, context truncation, or internal resets). The lookup chain is: TTY mapping → session ID mapping → unknown.
 
 **SessionEnd:**
-1. Looks up codename from session mapping
-2. Removes agent registry entry (frees codename for reuse)
-3. Removes session mapping
+1. Looks up codename using TTY-first lookup (handles session ID changes)
+2. Marks agent as ended (preserves file for TTY recovery on restart)
+3. Removes session and TTY mappings
 4. Cleans up any file locks held by this agent
-5. Deletes agent's inbox and all messages
-6. If no agents remain, removes entire `.hivemind` directory
+5. Keeps inbox (messages may arrive while session is down)
+6. If no agents have active sessions, removes entire `.hivemind` directory
 
 ### Message Delivery
 
@@ -351,6 +358,8 @@ For broadcasts (`target: "all"`), individual messages are created in each agent'
 │   └── bravo.json
 ├── sessions/            # Session ID -> codename mappings
 │   └── <session-id>.txt
+├── tty-sessions/        # TTY hash -> codename mappings (stable identity)
+│   └── <tty-hash>.txt
 ├── messages/            # Per-agent inboxes
 │   ├── inbox-alfa/
 │   │   └── msg-*.json   # Pending messages
@@ -366,13 +375,26 @@ For broadcasts (`target: "all"`), individual messages are created in each agent'
   "sessionName": "alfa",
   "sessionId": "<claude-session-id>",
   "startedAt": "2025-01-22T14:30:00Z",
-  "lastHeartbeat": "2025-01-22T14:35:00Z",
   "currentTask": "Implementing auth",
   "workingOn": ["src/auth.ts"],
-  "tty": "/dev/ttys007",
-  "status": "active"
+  "tty": "/dev/ttys007"
 }
 ```
+
+When an agent's session ends, `sessionId` is cleared and `endedAt` is added:
+```json
+{
+  "sessionName": "alfa",
+  "sessionId": "",
+  "startedAt": "2025-01-22T14:30:00Z",
+  "endedAt": "2025-01-22T15:00:00Z",
+  "currentTask": "",
+  "workingOn": [],
+  "tty": "/dev/ttys007"
+}
+```
+
+This allows the agent to be reclaimed when a new session starts in the same terminal.
 
 **Message file format:**
 ```json
@@ -413,10 +435,13 @@ osascript scripts/utils/send-keystroke.scpt /dev/ttys000 "test"
 
 ### Stale agents showing
 
-If a Claude session crashed without cleanup, remove stale entries:
+Agents are automatically reclaimed when a new session starts in the same terminal (TTY-based recovery). However, if a terminal window was closed without proper cleanup, stale agent files may remain.
+
+To clean up manually:
 ```bash
 rm -rf .hivemind/agents/*
 rm -rf .hivemind/sessions/*
+rm -rf .hivemind/tty-sessions/*
 ```
 
 ### Messages not appearing
