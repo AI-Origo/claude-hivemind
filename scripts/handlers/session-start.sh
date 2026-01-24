@@ -72,27 +72,32 @@ else
   # Current timestamp
   NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-  # First check if there's an MCP-registered agent we should adopt
-  # MCP server may have registered an agent before this hook runs
   ASSIGNED_NAME=""
   ADOPTED_MCP_AGENT=false
-  for agent_file in "$AGENTS_DIR"/*.json; do
-    [ -f "$agent_file" ] || continue
-    agent_name=$(basename "$agent_file" .json)
-    agent_session_id=$(jq -r '.sessionId // ""' "$agent_file" 2>/dev/null)
 
-    # If this is an MCP-registered agent (session ID starts with mcp-), adopt it
-    if [[ "$agent_session_id" == mcp-* ]]; then
-      ASSIGNED_NAME="$agent_name"
-      ADOPTED_MCP_AGENT=true
-      # Update agent file with our Claude session ID and TTY
-      jq --arg sid "$SESSION_ID" --arg tty "$AGENT_TTY" '.sessionId = $sid | .tty = $tty' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
-      break
+  # Priority 1: Check TTY mapping file first (most authoritative for identity recovery)
+  # TTY mapping persists across session changes, so same terminal always recovers same agent
+  if [[ -n "$AGENT_TTY" ]]; then
+    TTY_HASH=$(hash_tty "$AGENT_TTY")
+    TTY_FILE="$TTY_SESSIONS_DIR/$TTY_HASH.txt"
+    if [[ -f "$TTY_FILE" ]]; then
+      ASSIGNED_NAME=$(cat "$TTY_FILE")
+      # Verify the agent file exists
+      if [[ -f "$AGENTS_DIR/$ASSIGNED_NAME.json" ]]; then
+        # Update agent file with new session ID, clear endedAt if present
+        jq --arg sid "$SESSION_ID" --arg tty "$AGENT_TTY" \
+          '.sessionId = $sid | .tty = $tty | del(.endedAt)' \
+          "$AGENTS_DIR/$ASSIGNED_NAME.json" > "$AGENTS_DIR/$ASSIGNED_NAME.json.tmp" \
+          && mv "$AGENTS_DIR/$ASSIGNED_NAME.json.tmp" "$AGENTS_DIR/$ASSIGNED_NAME.json"
+        ADOPTED_MCP_AGENT=true
+      else
+        # Agent file missing, clear the invalid mapping
+        ASSIGNED_NAME=""
+      fi
     fi
-  done
+  fi
 
-  # If no MCP agent found, check for TTY-based recovery (same terminal, any sessionId state)
-  # This handles: ended agents, AND session_id changes from /clear or context resets
+  # Priority 2: Check agent files for matching TTY (fallback if mapping file was deleted)
   if [ -z "$ASSIGNED_NAME" ] && [[ -n "$AGENT_TTY" ]]; then
     for agent_file in "$AGENTS_DIR"/*.json; do
       [ -f "$agent_file" ] || continue
@@ -105,13 +110,32 @@ else
         # Update agent file with new session ID, clear endedAt if present
         jq --arg sid "$SESSION_ID" '.sessionId = $sid | del(.endedAt)' "$agent_file" > "$agent_file.tmp" \
           && mv "$agent_file.tmp" "$agent_file"
-        ADOPTED_MCP_AGENT=true  # Reuse flag to skip creating new agent file
+        ADOPTED_MCP_AGENT=true
         break
       fi
     done
   fi
 
-  # If no ended agent found, find first available codename
+  # Priority 3: Check for MCP-registered agent we should adopt
+  # MCP server may have registered an agent before this hook runs
+  if [ -z "$ASSIGNED_NAME" ]; then
+    for agent_file in "$AGENTS_DIR"/*.json; do
+      [ -f "$agent_file" ] || continue
+      agent_name=$(basename "$agent_file" .json)
+      agent_session_id=$(jq -r '.sessionId // ""' "$agent_file" 2>/dev/null)
+
+      # If this is an MCP-registered agent (session ID starts with mcp-), adopt it
+      if [[ "$agent_session_id" == mcp-* ]]; then
+        ASSIGNED_NAME="$agent_name"
+        ADOPTED_MCP_AGENT=true
+        # Update agent file with our Claude session ID and TTY
+        jq --arg sid "$SESSION_ID" --arg tty "$AGENT_TTY" '.sessionId = $sid | .tty = $tty' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
+        break
+      fi
+    done
+  fi
+
+  # Priority 4: Find first available codename
   if [ -z "$ASSIGNED_NAME" ]; then
     for name in "${AGENT_NAMES[@]}"; do
       if [ ! -f "$AGENTS_DIR/$name.json" ]; then

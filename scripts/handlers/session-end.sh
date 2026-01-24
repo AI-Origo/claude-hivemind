@@ -121,11 +121,9 @@ fi
 SESSION_FILE="$SESSIONS_DIR/$SESSION_ID.txt"
 rm -f "$SESSION_FILE"
 
-# Remove TTY mapping (agent can reclaim via agent file TTY on restart)
-if [[ -n "$AGENT_TTY" ]]; then
-  TTY_HASH=$(hash_tty "$AGENT_TTY")
-  rm -f "$TTY_SESSIONS_DIR/$TTY_HASH.txt"
-fi
+# Keep TTY mapping - it persists across session changes so SessionStart can recover
+# the correct agent identity. If the TTY is later reused by a different agent,
+# SessionStart will overwrite the mapping naturally.
 
 # Clean up locks held by this agent
 if [ -d "$LOCKS_DIR" ]; then

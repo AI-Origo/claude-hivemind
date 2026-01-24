@@ -105,8 +105,12 @@ claim_agent_name() {
     for f in "$AGENTS_DIR"/*.json; do
       [[ -f "$f" ]] || continue
       local session_id=$(jq -r '.sessionId // ""' "$f" 2>/dev/null)
+      local agent_tty=$(jq -r '.tty // ""' "$f" 2>/dev/null)
       # Skip MCP-registered agents (they have session IDs starting with "mcp-")
       [[ "$session_id" == mcp-* ]] && continue
+      # Skip agents with empty sessionId that have a TTY - these are between
+      # sessions and will be recovered by SessionStart via TTY mapping
+      [[ -z "$session_id" && -n "$agent_tty" ]] && continue
 
       # Found a hook-registered agent - reuse this name
       claimed_name=$(jq -r '.sessionName' "$f" 2>/dev/null)
