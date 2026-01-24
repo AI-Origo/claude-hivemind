@@ -30,13 +30,26 @@ Alternatively, the first time the wake feature runs, macOS will prompt you to al
 claude --plugin-dir /path/to/hivemind
 ```
 
-### 3. Run your first command
+### 3. (Optional) Install Status Line
+
+```
+/hive install
+```
+
+This adds a custom status line to Claude Code showing your agent name and current task. The status line is purely cosmetic - hivemind works fully without it.
+
+To update an existing status line config:
+```
+/hive install --force
+```
+
+### 4. Run your first command
 
 ```
 /hive help
 ```
 
-### 4. Add to `.gitignore`
+### 5. Add to `.gitignore`
 
 ```
 .hivemind/
@@ -68,6 +81,7 @@ Hivemind enables multiple Claude Code agents to work together on the same codeba
 | `/hive task` | Clear your task |
 | `/hive changes` | View last 20 file changes |
 | `/hive changes <n>` | View last n changes |
+| `/hive install` | Install status line config (optional) |
 
 ## Examples
 

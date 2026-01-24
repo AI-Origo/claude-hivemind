@@ -510,6 +510,40 @@ COORDINATION TIPS
 4. Review hive_changes to see recent activity"
 }
 
+tool_install() {
+  local force="${1:-false}"
+  local settings_dir="$HOME/.claude"
+  local settings_file="$settings_dir/settings.json"
+
+  # The statusLine command to install
+  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); if [[ -d "$cwd/.hivemind" ]]; then tty=$(tty 2>/dev/null || echo ""); if [[ -n "$tty" ]]; then tty_hash=$(echo -n "$tty" | md5 2>/dev/null || echo -n "$tty" | md5sum 2>/dev/null | cut -d'"'"' '"'"' -f1 || echo -n "$tty" | shasum | cut -d'"'"' '"'"' -f1); tty_file="$cwd/.hivemind/tty-sessions/$tty_hash.txt"; if [[ -f "$tty_file" ]]; then agent=$(cat "$tty_file"); agent_file="$cwd/.hivemind/agents/$agent.json"; if [[ -f "$agent_file" ]]; then task=$(jq -r '"'"'.currentTask // ""'"'"' "$agent_file"); if [[ -n "$task" ]]; then echo "[$agent] $task"; else echo "[$agent]"; fi; exit 0; fi; fi; fi; fi'
+
+  # Create directory if needed
+  mkdir -p "$settings_dir"
+
+  # Check existing file
+  if [[ -f "$settings_file" ]]; then
+    local has_statusline=$(jq 'has("statusLine")' "$settings_file" 2>/dev/null)
+    if [[ "$has_statusline" == "true" && "$force" != "true" ]]; then
+      text_result "statusLine already configured in ~/.claude/settings.json. Use /hive install --force to overwrite."
+      return
+    fi
+    # Merge with existing settings
+    jq --arg cmd "$statusline_cmd" '.statusLine = {"type": "command", "command": $cmd}' \
+      "$settings_file" > "$settings_file.tmp" && mv "$settings_file.tmp" "$settings_file"
+  else
+    # Create new file
+    jq -n --arg cmd "$statusline_cmd" '{"statusLine": {"type": "command", "command": $cmd}}' \
+      > "$settings_file"
+  fi
+
+  if [[ "$force" == "true" ]]; then
+    text_result "statusLine config updated in ~/.claude/settings.json. Restart Claude Code to see the change."
+  else
+    text_result "statusLine config installed to ~/.claude/settings.json. Restart Claude Code to see the change."
+  fi
+}
+
 # === MCP PROTOCOL ===
 
 handle_initialize() {
@@ -524,7 +558,8 @@ handle_tools_list() {
     {"name":"hive_message","description":"Send a message to another agent or broadcast to all agents","inputSchema":{"type":"object","properties":{"target":{"type":"string","description":"Agent name (alfa, bravo, etc.) or \"all\" for broadcast"},"body":{"type":"string","description":"Message content"}},"required":["target","body"]}},
     {"name":"hive_task","description":"Set or clear your current task (visible to other agents in status)","inputSchema":{"type":"object","properties":{"description":{"type":"string","description":"Task description (omit or empty string to clear)"}},"required":[]}},
     {"name":"hive_changes","description":"View recent file changes made by all agents","inputSchema":{"type":"object","properties":{"count":{"type":"integer","description":"Number of changes to show (default 20)"}},"required":[]}},
-    {"name":"hive_help","description":"Show Hivemind command reference. Display the full output to the user as-is.","inputSchema":{"type":"object","properties":{},"required":[]}}
+    {"name":"hive_help","description":"Show Hivemind command reference. Display the full output to the user as-is.","inputSchema":{"type":"object","properties":{},"required":[]}},
+    {"name":"hive_install","description":"Install hivemind status line config to ~/.claude/settings.json (shows agent name and task)","inputSchema":{"type":"object","properties":{"force":{"type":"boolean","description":"Overwrite existing statusLine config if present"}},"required":[]}}
   ]}'
 }
 
@@ -577,6 +612,10 @@ handle_tools_call() {
     hive_changes)
       local count=$(echo "$args" | jq -r '.count // 20')
       send_response "$id" "$(tool_changes "$count")"
+      ;;
+    hive_install)
+      local force=$(echo "$args" | jq -r '.force // false')
+      send_response "$id" "$(tool_install "$force")"
       ;;
     *) send_error "$id" "-32601" "Unknown tool: $tool" ;;
   esac

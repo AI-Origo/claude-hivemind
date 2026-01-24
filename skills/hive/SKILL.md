@@ -19,6 +19,8 @@ All Hivemind commands are available as MCP tools. When the user runs `/hive <com
 | `/hive read` or `/hive messages` | `hive_read_messages` |
 | `/hive changes [n]` | `hive_changes` with optional `count` |
 | `/hive task [description]` | `hive_task` with optional `description` |
+| `/hive install` | `hive_install` |
+| `/hive install --force` | `hive_install` with `force: true` |
 
 ## Instructions
 
@@ -32,6 +34,8 @@ Parse `$ARGUMENTS` and call the corresponding MCP tool:
 6. If `read` or `messages`: Call `hive_read_messages` (reads and consumes messages)
 7. If `changes [n]`: Call `hive_changes` with `{"count": n}` (default 20)
 8. If `task [description]`: Call `hive_task` with `{"description": "<description>"}` (empty to clear)
+9. If `install`: Call `hive_install` with `{"force": false}`
+10. If `install --force` or `install -f`: Call `hive_install` with `{"force": true}`
 
 The MCP tools handle all coordination logic.
 
