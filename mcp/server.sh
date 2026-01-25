@@ -134,9 +134,16 @@ claim_agent_name() {
 
     # Create agent file (only if we're claiming a new name)
     local now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    cat > "$AGENTS_DIR/$claimed_name.json" << EOF
-{"sessionName":"$claimed_name","sessionId":"mcp-$$","startedAt":"$now","currentTask":"","lastTask":"","workingOn":[]}
-EOF
+    local current_task="" last_task=""
+    # Preserve task state if agent file exists (race condition protection)
+    if [[ -f "$AGENTS_DIR/$claimed_name.json" ]]; then
+      current_task=$(jq -r '.currentTask // ""' "$AGENTS_DIR/$claimed_name.json" 2>/dev/null || echo "")
+      last_task=$(jq -r '.lastTask // ""' "$AGENTS_DIR/$claimed_name.json" 2>/dev/null || echo "")
+    fi
+    jq -n --arg name "$claimed_name" --arg sid "mcp-$$" --arg now "$now" \
+          --arg ct "$current_task" --arg lt "$last_task" \
+      '{sessionName:$name,sessionId:$sid,startedAt:$now,currentTask:$ct,lastTask:$lt,workingOn:[]}' \
+      > "$AGENTS_DIR/$claimed_name.json"
     mkdir -p "$MESSAGES_DIR/inbox-$claimed_name"
   fi
 
