@@ -529,9 +529,9 @@ tool_install() {
   local settings_file="$settings_dir/settings.json"
 
   # The statusLine command to install
-  # Colors: Yellow (\033[0;33m) for active task, Dark Gray (\033[0;90m) for last task
-  # Task appears on a new line below the agent name
-  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); if [[ -d "$cwd/.hivemind" ]]; then tty=$(tty 2>/dev/null || echo ""); if [[ -n "$tty" ]]; then tty_hash=$(echo -n "$tty" | md5 2>/dev/null || echo -n "$tty" | md5sum 2>/dev/null | cut -d'"'"' '"'"' -f1 || echo -n "$tty" | shasum | cut -d'"'"' '"'"' -f1); tty_file="$cwd/.hivemind/tty-sessions/$tty_hash.txt"; if [[ -f "$tty_file" ]]; then agent=$(cat "$tty_file"); agent_file="$cwd/.hivemind/agents/$agent.json"; if [[ -f "$agent_file" ]]; then task=$(jq -r '"'"'.currentTask // ""'"'"' "$agent_file"); lastTask=$(jq -r '"'"'.lastTask // ""'"'"' "$agent_file"); if [[ -n "$task" ]]; then echo -e "[$agent]\n\033[0;33m$task\033[0m"; elif [[ -n "$lastTask" ]]; then echo -e "[$agent]\n\033[0;90m$lastTask\033[0m"; else echo "[$agent]"; fi; exit 0; fi; fi; fi; fi'
+  # Colors: Purple (\033[0;35m) for version, Yellow (\033[0;33m) for active task, Dark Gray (\033[0;90m) for last task
+  # Shows task if set, otherwise shows hivemind version as fallback
+  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); if [[ -d "$cwd/.hivemind" ]]; then tty=$(tty 2>/dev/null || echo ""); if [[ -n "$tty" ]]; then tty_hash=$(echo -n "$tty" | md5 2>/dev/null || echo -n "$tty" | md5sum 2>/dev/null | cut -d'"'"' '"'"' -f1 || echo -n "$tty" | shasum | cut -d'"'"' '"'"' -f1); tty_file="$cwd/.hivemind/tty-sessions/$tty_hash.txt"; if [[ -f "$tty_file" ]]; then agent=$(cat "$tty_file"); agent_file="$cwd/.hivemind/agents/$agent.json"; if [[ -f "$agent_file" ]]; then task=$(jq -r '"'"'.currentTask // ""'"'"' "$agent_file"); lastTask=$(jq -r '"'"'.lastTask // ""'"'"' "$agent_file"); if [[ -n "$task" ]]; then echo -e "[$agent]\n\033[0;33m$task\033[0m"; elif [[ -n "$lastTask" ]]; then echo -e "[$agent]\n\033[0;90m$lastTask\033[0m"; else version_file="$cwd/.hivemind/version.txt"; if [[ -f "$version_file" ]]; then version=$(cat "$version_file"); echo -e "[$agent]\n\033[0;35mhivemind v$version\033[0m"; else echo "[$agent]"; fi; fi; exit 0; fi; fi; fi; fi'
 
   # Create directory if needed
   mkdir -p "$settings_dir"

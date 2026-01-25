@@ -36,7 +36,7 @@ claude --plugin-dir /path/to/hivemind
 /hive install
 ```
 
-This adds a custom status line to Claude Code showing your agent name and current task. The status line is purely cosmetic - hivemind works fully without it.
+This adds a custom status line to Claude Code showing your agent name and current task (or the hivemind version when no task is set). The status line is purely cosmetic - hivemind works fully without it.
 
 To update an existing status line config:
 ```
