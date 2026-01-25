@@ -36,6 +36,9 @@ if [ -z "$WORKING_DIR" ] || [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
+# Current timestamp (used for startedAt updates)
+NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
 # Coordination directories
 HIVEMIND_DIR="$WORKING_DIR/.hivemind"
 AGENTS_DIR="$HIVEMIND_DIR/agents"
@@ -46,6 +49,15 @@ LOCKS_DIR="$HIVEMIND_DIR/locks"
 
 # Create directories if they don't exist
 mkdir -p "$AGENTS_DIR" "$SESSIONS_DIR" "$TTY_SESSIONS_DIR" "$MESSAGES_DIR" "$LOCKS_DIR"
+
+# Write version file from plugin.json
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PLUGIN_JSON="$PLUGIN_ROOT/.claude-plugin/plugin.json"
+if [[ -f "$PLUGIN_JSON" ]]; then
+  VERSION=$(jq -r '.version // "unknown"' "$PLUGIN_JSON")
+  echo "$VERSION" > "$HIVEMIND_DIR/version.txt"
+fi
 
 # Determine agent's TTY
 # Try the tty command first, fall back to parent process lookup
@@ -69,9 +81,6 @@ fi
 if [ -f "$SESSIONS_DIR/$SESSION_ID.txt" ]; then
   ASSIGNED_NAME=$(cat "$SESSIONS_DIR/$SESSION_ID.txt")
 else
-  # Current timestamp
-  NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
   ASSIGNED_NAME=""
   ADOPTED_MCP_AGENT=false
 
@@ -84,9 +93,9 @@ else
       ASSIGNED_NAME=$(cat "$TTY_FILE")
       # Verify the agent file exists
       if [[ -f "$AGENTS_DIR/$ASSIGNED_NAME.json" ]]; then
-        # Update agent file with new session ID, clear endedAt if present
-        jq --arg sid "$SESSION_ID" --arg tty "$AGENT_TTY" \
-          '.sessionId = $sid | .tty = $tty | del(.endedAt)' \
+        # Update agent file with new session ID, startedAt, clear endedAt if present
+        jq --arg sid "$SESSION_ID" --arg tty "$AGENT_TTY" --arg now "$NOW" \
+          '.sessionId = $sid | .tty = $tty | .startedAt = $now | del(.endedAt)' \
           "$AGENTS_DIR/$ASSIGNED_NAME.json" > "$AGENTS_DIR/$ASSIGNED_NAME.json.tmp" \
           && mv "$AGENTS_DIR/$ASSIGNED_NAME.json.tmp" "$AGENTS_DIR/$ASSIGNED_NAME.json"
         ADOPTED_MCP_AGENT=true
@@ -107,8 +116,8 @@ else
       # If same TTY, reclaim this agent (update sessionId to current)
       if [[ "$agent_tty" == "$AGENT_TTY" ]]; then
         ASSIGNED_NAME="$agent_name"
-        # Update agent file with new session ID, clear endedAt if present
-        jq --arg sid "$SESSION_ID" '.sessionId = $sid | del(.endedAt)' "$agent_file" > "$agent_file.tmp" \
+        # Update agent file with new session ID, startedAt, clear endedAt if present
+        jq --arg sid "$SESSION_ID" --arg now "$NOW" '.sessionId = $sid | .startedAt = $now | del(.endedAt)' "$agent_file" > "$agent_file.tmp" \
           && mv "$agent_file.tmp" "$agent_file"
         ADOPTED_MCP_AGENT=true
         break
@@ -128,8 +137,8 @@ else
       if [[ "$agent_session_id" == mcp-* ]]; then
         ASSIGNED_NAME="$agent_name"
         ADOPTED_MCP_AGENT=true
-        # Update agent file with our Claude session ID and TTY
-        jq --arg sid "$SESSION_ID" --arg tty "$AGENT_TTY" '.sessionId = $sid | .tty = $tty' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
+        # Update agent file with our Claude session ID, TTY, and startedAt
+        jq --arg sid "$SESSION_ID" --arg tty "$AGENT_TTY" --arg now "$NOW" '.sessionId = $sid | .tty = $tty | .startedAt = $now' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
         break
       fi
     done
