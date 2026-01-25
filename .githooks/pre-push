@@ -16,92 +16,106 @@ if [[ ! -f "$PLUGIN_JSON" ]]; then
   exit 0
 fi
 
-# Get current version
-CURRENT_VERSION=$(jq -r '.version' "$PLUGIN_JSON")
-if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "null" ]]; then
-  exit 0
-fi
-
-# Parse version components
-IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
-
-# Find the last version tag, or use initial commit if none
-LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-if [[ -n "$LAST_TAG" ]]; then
-  COMMIT_RANGE="${LAST_TAG}..HEAD"
-else
-  # No tags yet, check all commits on current branch
-  COMMIT_RANGE="HEAD"
-fi
-
-# Analyze commits for conventional commit types
-COMMITS=$(git log "$COMMIT_RANGE" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
-
-BUMP_TYPE=""
-while IFS= read -r msg; do
-  # Skip empty lines and version bump commits
-  [[ -z "$msg" ]] && continue
-  [[ "$msg" =~ ^chore.*:.*bump\ version ]] && continue
-  [[ "$msg" =~ ^chore\(release\) ]] && continue
-
-  # Check for breaking changes (major bump)
-  if [[ "$msg" =~ ^[a-z]+!: ]] || [[ "$msg" =~ BREAKING\ CHANGE ]]; then
-    BUMP_TYPE="major"
-    break
-  fi
-
-  # Check for features (minor bump)
-  if [[ "$msg" =~ ^feat: ]] || [[ "$msg" =~ ^feat\( ]]; then
-    if [[ "$BUMP_TYPE" != "major" ]]; then
-      BUMP_TYPE="minor"
-    fi
-  fi
-
-  # Check for fixes (patch bump)
-  if [[ "$msg" =~ ^fix: ]] || [[ "$msg" =~ ^fix\( ]]; then
-    if [[ -z "$BUMP_TYPE" ]]; then
-      BUMP_TYPE="patch"
-    fi
-  fi
-done <<< "$COMMITS"
-
-# No version-worthy commits found
-if [[ -z "$BUMP_TYPE" ]]; then
-  exit 0
-fi
-
-# Calculate new version
-case "$BUMP_TYPE" in
-  major)
-    NEW_VERSION="$((MAJOR + 1)).0.0"
-    ;;
-  minor)
-    NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
-    ;;
-  patch)
-    NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-    ;;
-esac
-
-# Check if version already matches (avoid duplicate bumps)
-if [[ "$CURRENT_VERSION" == "$NEW_VERSION" ]]; then
-  exit 0
-fi
-
-# Check if the most recent commit is already a version bump to this version
+# Skip if last commit is already a version bump
 LAST_COMMIT_MSG=$(git log -1 --pretty=format:"%s")
-if [[ "$LAST_COMMIT_MSG" == "chore: bump version to $NEW_VERSION" ]]; then
+if [[ "$LAST_COMMIT_MSG" =~ ^chore:\ bump\ version ]]; then
   exit 0
 fi
 
-echo "Bumping version: $CURRENT_VERSION → $NEW_VERSION ($BUMP_TYPE)"
+# Read push info from stdin: <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Skip delete pushes
+  if [[ "$local_sha" == "0000000000000000000000000000000000000000" ]]; then
+    continue
+  fi
 
-# Update plugin.json
-jq --arg v "$NEW_VERSION" '.version = $v' "$PLUGIN_JSON" > "$PLUGIN_JSON.tmp" \
-  && mv "$PLUGIN_JSON.tmp" "$PLUGIN_JSON"
+  # Only process main branch
+  if [[ "$remote_ref" != "refs/heads/main" ]]; then
+    continue
+  fi
 
-# Create version bump commit
-git add "$PLUGIN_JSON"
-git commit -m "chore: bump version to $NEW_VERSION"
+  # Determine commit range
+  if [[ "$remote_sha" == "0000000000000000000000000000000000000000" ]]; then
+    # New branch, check all commits
+    COMMIT_RANGE="$local_sha"
+  else
+    # Existing branch, check new commits only
+    COMMIT_RANGE="${remote_sha}..${local_sha}"
+  fi
 
-echo "Created version bump commit. Push will continue with new commit."
+  # Get current version
+  CURRENT_VERSION=$(jq -r '.version' "$PLUGIN_JSON")
+  if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "null" ]]; then
+    exit 0
+  fi
+
+  # Parse version components
+  IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+  # Analyze commits for conventional commit types
+  BUMP_TYPE=""
+  while IFS= read -r msg; do
+    # Skip empty lines and version bump commits
+    [[ -z "$msg" ]] && continue
+    [[ "$msg" =~ ^chore.*:.*bump\ version ]] && continue
+    [[ "$msg" =~ ^chore\(release\) ]] && continue
+
+    # Check for breaking changes (major bump)
+    if [[ "$msg" =~ ^[a-z]+!: ]] || [[ "$msg" =~ BREAKING\ CHANGE ]]; then
+      BUMP_TYPE="major"
+      break
+    fi
+
+    # Check for features (minor bump)
+    if [[ "$msg" =~ ^feat: ]] || [[ "$msg" =~ ^feat\( ]]; then
+      if [[ "$BUMP_TYPE" != "major" ]]; then
+        BUMP_TYPE="minor"
+      fi
+    fi
+
+    # Check for fixes (patch bump)
+    if [[ "$msg" =~ ^fix: ]] || [[ "$msg" =~ ^fix\( ]]; then
+      if [[ -z "$BUMP_TYPE" ]]; then
+        BUMP_TYPE="patch"
+      fi
+    fi
+  done < <(git log "$COMMIT_RANGE" --pretty=format:"%s" 2>/dev/null)
+
+  # No version-worthy commits found
+  if [[ -z "$BUMP_TYPE" ]]; then
+    exit 0
+  fi
+
+  # Calculate new version
+  case "$BUMP_TYPE" in
+    major)
+      NEW_VERSION="$((MAJOR + 1)).0.0"
+      ;;
+    minor)
+      NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
+      ;;
+    patch)
+      NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+      ;;
+  esac
+
+  # Check if version already matches (avoid duplicate bumps)
+  if [[ "$CURRENT_VERSION" == "$NEW_VERSION" ]]; then
+    exit 0
+  fi
+
+  echo "Bumping version: $CURRENT_VERSION → $NEW_VERSION ($BUMP_TYPE)"
+
+  # Update plugin.json
+  jq --arg v "$NEW_VERSION" '.version = $v' "$PLUGIN_JSON" > "$PLUGIN_JSON.tmp" \
+    && mv "$PLUGIN_JSON.tmp" "$PLUGIN_JSON"
+
+  # Create version bump commit
+  git add "$PLUGIN_JSON"
+  git commit -m "chore: bump version to $NEW_VERSION"
+
+  echo "Created version bump commit. Re-run 'git push' to include it."
+  exit 1  # Abort this push so user pushes again with the bump commit
+done
+
+exit 0
