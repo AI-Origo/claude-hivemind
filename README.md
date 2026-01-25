@@ -484,6 +484,35 @@ Check the debug logs for troubleshooting:
 - `/tmp/hivemind-mcp-debug.log` - MCP server events
 - `/tmp/hivemind-pre-tool-debug.log` - PreToolUse hook events
 
+## Development
+
+### Setup
+
+After cloning the repository, enable the git hooks:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+### Automatic Versioning
+
+The repository uses a pre-push hook that automatically bumps the version in `.claude-plugin/plugin.json` based on conventional commits:
+
+| Commit prefix | Version bump | Example |
+|---------------|--------------|---------|
+| `feat!:` or `BREAKING CHANGE` | Major (1.0.0 → 2.0.0) | `feat!: remove legacy API` |
+| `feat:` | Minor (0.1.0 → 0.2.0) | `feat: add new command` |
+| `fix:` | Patch (0.1.0 → 0.1.1) | `fix: handle edge case` |
+
+The hook analyzes commits being pushed and creates a version bump commit if needed. You'll see output like:
+
+```
+Bumping version: 0.13.0 → 0.13.1 (patch)
+Created version bump commit. Re-run 'git push' to include it.
+```
+
+Simply run `git push` again to include the bump commit.
+
 ## Contributing
 
 Found a bug or have a feature request? Open an issue at:
