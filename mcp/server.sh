@@ -135,7 +135,7 @@ claim_agent_name() {
     # Create agent file (only if we're claiming a new name)
     local now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     cat > "$AGENTS_DIR/$claimed_name.json" << EOF
-{"sessionName":"$claimed_name","sessionId":"mcp-$$","startedAt":"$now","currentTask":"","workingOn":[]}
+{"sessionName":"$claimed_name","sessionId":"mcp-$$","startedAt":"$now","currentTask":"","lastTask":"","workingOn":[]}
 EOF
     mkdir -p "$MESSAGES_DIR/inbox-$claimed_name"
   fi
@@ -427,10 +427,12 @@ tool_task() {
   fi
 
   if [[ -z "$description" ]]; then
-    jq '.currentTask = ""' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
+    # Copy currentTask to lastTask before clearing
+    jq '.lastTask = .currentTask | .currentTask = ""' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
     text_result "Task cleared."
   else
-    jq --arg t "$description" '.currentTask = $t' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
+    # Set new task and clear lastTask
+    jq --arg t "$description" '.currentTask = $t | .lastTask = ""' "$agent_file" > "$agent_file.tmp" && mv "$agent_file.tmp" "$agent_file"
     text_result "Task set: \"$description\""
   fi
 }
@@ -520,7 +522,9 @@ tool_install() {
   local settings_file="$settings_dir/settings.json"
 
   # The statusLine command to install
-  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); if [[ -d "$cwd/.hivemind" ]]; then tty=$(tty 2>/dev/null || echo ""); if [[ -n "$tty" ]]; then tty_hash=$(echo -n "$tty" | md5 2>/dev/null || echo -n "$tty" | md5sum 2>/dev/null | cut -d'"'"' '"'"' -f1 || echo -n "$tty" | shasum | cut -d'"'"' '"'"' -f1); tty_file="$cwd/.hivemind/tty-sessions/$tty_hash.txt"; if [[ -f "$tty_file" ]]; then agent=$(cat "$tty_file"); agent_file="$cwd/.hivemind/agents/$agent.json"; if [[ -f "$agent_file" ]]; then task=$(jq -r '"'"'.currentTask // ""'"'"' "$agent_file"); if [[ -n "$task" ]]; then echo "[$agent] $task"; else echo "[$agent]"; fi; exit 0; fi; fi; fi; fi'
+  # Colors: Yellow (\033[0;33m) for active task, Dark Gray (\033[0;90m) for last task
+  # Task appears on a new line below the agent name
+  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); if [[ -d "$cwd/.hivemind" ]]; then tty=$(tty 2>/dev/null || echo ""); if [[ -n "$tty" ]]; then tty_hash=$(echo -n "$tty" | md5 2>/dev/null || echo -n "$tty" | md5sum 2>/dev/null | cut -d'"'"' '"'"' -f1 || echo -n "$tty" | shasum | cut -d'"'"' '"'"' -f1); tty_file="$cwd/.hivemind/tty-sessions/$tty_hash.txt"; if [[ -f "$tty_file" ]]; then agent=$(cat "$tty_file"); agent_file="$cwd/.hivemind/agents/$agent.json"; if [[ -f "$agent_file" ]]; then task=$(jq -r '"'"'.currentTask // ""'"'"' "$agent_file"); lastTask=$(jq -r '"'"'.lastTask // ""'"'"' "$agent_file"); if [[ -n "$task" ]]; then echo -e "[$agent]\n\033[0;33m$task\033[0m"; elif [[ -n "$lastTask" ]]; then echo -e "[$agent]\n\033[0;90m$lastTask\033[0m"; else echo "[$agent]"; fi; exit 0; fi; fi; fi; fi'
 
   # Create directory if needed
   mkdir -p "$settings_dir"

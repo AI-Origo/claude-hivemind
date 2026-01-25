@@ -163,6 +163,7 @@ else
   "sessionId": "$SESSION_ID",
   "startedAt": "$NOW",
   "currentTask": "",
+  "lastTask": "",
   "workingOn": [],
   "tty": "$AGENT_TTY"
 }

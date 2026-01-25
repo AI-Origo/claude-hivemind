@@ -113,7 +113,7 @@ AGENT_FILE="$AGENTS_DIR/$AGENT_NAME.json"
 # Clear sessionId and add endedAt timestamp
 if [ -f "$AGENT_FILE" ]; then
   NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  jq --arg ts "$NOW" '.sessionId = "" | .endedAt = $ts | .currentTask = ""' "$AGENT_FILE" > "$AGENT_FILE.tmp" \
+  jq --arg ts "$NOW" '.sessionId = "" | .endedAt = $ts | .lastTask = .currentTask | .currentTask = ""' "$AGENT_FILE" > "$AGENT_FILE.tmp" \
     && mv "$AGENT_FILE.tmp" "$AGENT_FILE"
 fi
 
