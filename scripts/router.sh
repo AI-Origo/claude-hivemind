@@ -40,6 +40,9 @@ case "$EVENT" in
   "PostToolUse")
     exec "$HANDLERS_DIR/post-tool.sh" <<< "$INPUT"
     ;;
+  "Stop")
+    exec "$HANDLERS_DIR/stop.sh" <<< "$INPUT"
+    ;;
   *)
     # Unknown event, exit silently
     exit 0
