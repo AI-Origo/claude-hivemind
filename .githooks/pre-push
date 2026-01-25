@@ -54,6 +54,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 
   # Analyze commits for conventional commit types
   BUMP_TYPE=""
+  COMMITS=$(git log "$COMMIT_RANGE" --pretty=format:"%s" 2>/dev/null || true)
+
   while IFS= read -r msg; do
     # Skip empty lines and version bump commits
     [[ -z "$msg" ]] && continue
@@ -79,7 +81,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         BUMP_TYPE="patch"
       fi
     fi
-  done < <(git log "$COMMIT_RANGE" --pretty=format:"%s" 2>/dev/null)
+  done <<< "$COMMITS"
 
   # No version-worthy commits found
   if [[ -z "$BUMP_TYPE" ]]; then
