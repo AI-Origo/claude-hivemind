@@ -24,7 +24,42 @@ AGENT_NAMES=(
   xray yankee zulu
 )
 
-HIVEMIND_DIR="${HIVEMIND_DIR:-.hivemind}"
+# Debug logging (defined early so we can log during startup)
+MCP_DEBUG_LOG="/tmp/hivemind-mcp-debug.log"
+log() {
+  echo "[Hivemind MCP] $*" >&2
+  echo "[$(date)] $*" >> "$MCP_DEBUG_LOG"
+}
+
+# Name of the hivemind directory (can be customized via env)
+HIVEMIND_DIRNAME="${HIVEMIND_DIRNAME:-.hivemind}"
+
+# Find hivemind directory by searching up from current directory
+find_hivemind_dir() {
+  local dir="${1:-$(pwd)}"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -d "$dir/$HIVEMIND_DIRNAME" ]]; then
+      echo "$dir/$HIVEMIND_DIRNAME"
+      return 0
+    fi
+    dir=$(dirname "$dir")
+  done
+  return 1
+}
+
+# Debug logging for subdirectory investigation
+log "=== MCP SERVER STARTUP ==="
+log "pwd: $(pwd)"
+log "HIVEMIND_DIRNAME env: ${HIVEMIND_DIRNAME}"
+
+# Search up directory tree for .hivemind, fall back to current dir
+HIVEMIND_DIR=$(find_hivemind_dir)
+if [[ -z "$HIVEMIND_DIR" ]]; then
+  HIVEMIND_DIR="$HIVEMIND_DIRNAME"
+fi
+
+log "HIVEMIND_DIR resolved: $HIVEMIND_DIR"
+log "HIVEMIND_DIR exists: $(test -d "$HIVEMIND_DIR" && echo yes || echo no)"
 AGENTS_DIR="$HIVEMIND_DIR/agents"
 SESSIONS_DIR="$HIVEMIND_DIR/sessions"
 TTY_SESSIONS_DIR="$HIVEMIND_DIR/tty-sessions"
@@ -65,12 +100,6 @@ lookup_agent_name() {
   fi
 
   echo "$agent_name"
-}
-
-MCP_DEBUG_LOG="/tmp/hivemind-mcp-debug.log"
-log() {
-  echo "[Hivemind MCP] $*" >&2
-  echo "[$(date)] $*" >> "$MCP_DEBUG_LOG"
 }
 
 ensure_dirs() {
