@@ -25,6 +25,19 @@ hash_tty() {
   echo -n "$tty" | shasum | cut -d' ' -f1
 }
 
+# Find .hivemind directory by searching up from given path
+find_hivemind_dir() {
+  local dir="$1"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -d "$dir/.hivemind" ]]; then
+      echo "$dir/.hivemind"
+      return 0
+    fi
+    dir=$(dirname "$dir")
+  done
+  return 1
+}
+
 # Read input from stdin
 INPUT=$(cat)
 
@@ -39,8 +52,11 @@ fi
 # Current timestamp (used for startedAt updates)
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Coordination directories
-HIVEMIND_DIR="$WORKING_DIR/.hivemind"
+# Coordination directories - search up for existing .hivemind, fall back to current dir
+HIVEMIND_DIR=$(find_hivemind_dir "$WORKING_DIR")
+if [ -z "$HIVEMIND_DIR" ]; then
+  HIVEMIND_DIR="$WORKING_DIR/.hivemind"
+fi
 AGENTS_DIR="$HIVEMIND_DIR/agents"
 SESSIONS_DIR="$HIVEMIND_DIR/sessions"
 TTY_SESSIONS_DIR="$HIVEMIND_DIR/tty-sessions"
