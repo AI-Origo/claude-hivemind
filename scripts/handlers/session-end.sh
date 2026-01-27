@@ -1,21 +1,28 @@
 #!/bin/bash
-# session-end.sh - Mark agent as ended and cleanup
+# session-end.sh - Mark agent as ended and cleanup transient data
 #
 # On SessionEnd:
-# 1. Look up codename for this session
-# 2. Mark agent as ended (preserve file for TTY recovery on restart)
-# 3. Remove session mapping
-# 4. Clean up any locks held by this agent
-# 5. Keep inbox (messages may arrive while session is down)
+# 1. Look up agent by TTY or session_id
+# 2. Mark agent as ended in database (preserve for TTY recovery)
+# 3. Release file locks held by this agent
+# 4. DO NOT delete .hivemind directory - preserve database and config
+#
+# Preserved: .env, .env.example, .gitignore, hive.db, all knowledge/memory/tasks data
+# Cleaned: agent sessions (marked ended), file locks (released)
 
 set -uo pipefail
+
+# Get script directory and source helpers
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/db.sh"
 
 # Find .hivemind directory by searching up from given path
 find_hivemind_dir() {
   local dir="$1"
+  local dirname="${HIVEMIND_DIRNAME:-.hivemind}"
   while [[ "$dir" != "/" ]]; do
-    if [[ -d "$dir/.hivemind" ]]; then
-      echo "$dir/.hivemind"
+    if [[ -d "$dir/$dirname" ]]; then
+      echo "$dir/$dirname"
       return 0
     fi
     dir=$(dirname "$dir")
@@ -23,57 +30,26 @@ find_hivemind_dir() {
   return 1
 }
 
-# Get current TTY from process hierarchy
+# Get current TTY by walking up process tree
 get_current_tty() {
   local tty=""
   if command -v tty &>/dev/null; then
     tty=$(tty 2>/dev/null || true)
   fi
   if [[ -z "$tty" || "$tty" == "not a tty" ]]; then
-    local ppid=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
-    if [[ -n "$ppid" ]]; then
-      tty=$(ps -o tty= -p "$ppid" 2>/dev/null | tr -d ' ')
-      [[ -n "$tty" && "$tty" != "??" ]] && tty="/dev/$tty"
-    fi
+    # Walk up process tree to find a process with a TTY
+    local pid=$$
+    while [[ -n "$pid" && "$pid" != "1" ]]; do
+      local ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+      if [[ -n "$ptty" && "$ptty" != "??" ]]; then
+        tty="/dev/$ptty"
+        break
+      fi
+      pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    done
   fi
   [[ "$tty" == "not a tty" || "$tty" == "??" ]] && tty=""
   echo "$tty"
-}
-
-# Hash TTY path for safe filename
-hash_tty() {
-  local tty="$1"
-  echo -n "$tty" | md5 2>/dev/null || \
-  echo -n "$tty" | md5sum 2>/dev/null | cut -d' ' -f1 || \
-  echo -n "$tty" | shasum | cut -d' ' -f1
-}
-
-# Look up agent name using TTY first, then session_id
-lookup_agent_name() {
-  local tty="$1"
-  local session_id="$2"
-  local tty_sessions_dir="$3"
-  local sessions_dir="$4"
-  local agent_name=""
-
-  # Try TTY mapping first (most stable)
-  if [[ -n "$tty" ]]; then
-    local tty_hash=$(hash_tty "$tty")
-    local tty_file="$tty_sessions_dir/$tty_hash.txt"
-    if [[ -f "$tty_file" ]]; then
-      agent_name=$(cat "$tty_file")
-    fi
-  fi
-
-  # Fall back to session_id mapping
-  if [[ -z "$agent_name" && -n "$session_id" ]]; then
-    local session_file="$sessions_dir/$session_id.txt"
-    if [[ -f "$session_file" ]]; then
-      agent_name=$(cat "$session_file")
-    fi
-  fi
-
-  echo "$agent_name"
 }
 
 # Read input from stdin
@@ -87,73 +63,66 @@ if [ -z "$WORKING_DIR" ] || [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
-# Find hivemind directory (search parent directories)
+# Find hivemind directory
 HIVEMIND_DIR=$(find_hivemind_dir "$WORKING_DIR")
 if [ -z "$HIVEMIND_DIR" ]; then
   exit 0
 fi
-AGENTS_DIR="$HIVEMIND_DIR/agents"
-SESSIONS_DIR="$HIVEMIND_DIR/sessions"
-TTY_SESSIONS_DIR="$HIVEMIND_DIR/tty-sessions"
-MESSAGES_DIR="$HIVEMIND_DIR/messages"
-LOCKS_DIR="$HIVEMIND_DIR/locks"
+export HIVEMIND_DIR
+
+# Ensure database is initialized
+db_ensure_initialized
 
 # Get TTY for stable identity lookup
 AGENT_TTY=$(get_current_tty)
 
-# Look up codename (TTY first, then session_id) - handles case where session_id changed
-AGENT_NAME=$(lookup_agent_name "$AGENT_TTY" "$SESSION_ID" "$TTY_SESSIONS_DIR" "$SESSIONS_DIR")
+# Look up agent name (TTY first, then session_id)
+AGENT_NAME=""
+
+# Try TTY first (most stable)
+if [[ -n "$AGENT_TTY" ]]; then
+  AGENT_NAME=$(db_query "SELECT name FROM agents WHERE tty = $(db_quote "$AGENT_TTY") LIMIT 1" | jq -r '.[0].name // empty')
+fi
+
+# Fall back to session_id
+if [[ -z "$AGENT_NAME" && -n "$SESSION_ID" ]]; then
+  AGENT_NAME=$(db_query "SELECT name FROM agents WHERE session_id = $(db_quote "$SESSION_ID") LIMIT 1" | jq -r '.[0].name // empty')
+fi
+
 if [ -z "$AGENT_NAME" ]; then
   exit 0
 fi
 
-AGENT_FILE="$AGENTS_DIR/$AGENT_NAME.json"
+# Current timestamp
+NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Mark agent as ended (preserve file for TTY recovery on restart)
-# Clear sessionId and add endedAt timestamp
-if [ -f "$AGENT_FILE" ]; then
-  NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  jq --arg ts "$NOW" '.sessionId = "" | .endedAt = $ts | .lastTask = .currentTask | .currentTask = ""' "$AGENT_FILE" > "$AGENT_FILE.tmp" \
-    && mv "$AGENT_FILE.tmp" "$AGENT_FILE"
-fi
+# Mark agent as ended
+# - Clear session_id
+# - Set ended_at timestamp
+# - Copy current_task to last_task, clear current_task
+# - Keep TTY for recovery on restart
+db_exec "UPDATE agents SET
+  session_id = NULL,
+  ended_at = '$NOW',
+  last_task = current_task,
+  current_task = NULL
+WHERE name = $(db_quote "$AGENT_NAME")"
 
-# Remove session mapping
-SESSION_FILE="$SESSIONS_DIR/$SESSION_ID.txt"
-rm -f "$SESSION_FILE"
+# Release file locks held by this agent
+db_exec "DELETE FROM file_locks WHERE agent_name = $(db_quote "$AGENT_NAME")"
 
-# Keep TTY mapping - it persists across session changes so SessionStart can recover
-# the correct agent identity. If the TTY is later reused by a different agent,
-# SessionStart will overwrite the mapping naturally.
+# Delete all messages sent to or from this agent
+db_exec "DELETE FROM messages WHERE from_agent = $(db_quote "$AGENT_NAME") OR to_agent = $(db_quote "$AGENT_NAME")"
 
-# Clean up locks held by this agent
-if [ -d "$LOCKS_DIR" ]; then
-  for lock_file in "$LOCKS_DIR"/*.lock; do
-    [ -f "$lock_file" ] || continue
+# Check if any active agents remain
+ACTIVE_COUNT=$(db_query "SELECT COUNT(*) as cnt FROM agents WHERE ended_at IS NULL" | jq -r '.[0].cnt // 0')
 
-    lock_owner=$(jq -r '.sessionName // empty' "$lock_file" 2>/dev/null || true)
-    if [ "$lock_owner" = "$AGENT_NAME" ]; then
-      rm -f "$lock_file"
-    fi
-  done
-fi
-
-# Keep inbox - messages may arrive while session is down and be delivered on restart
-
-# Check if any agents have active sessions
-# Only clean up hivemind directory if NO agents have active sessionIds
-if [ -d "$AGENTS_DIR" ]; then
-  active_count=0
-  for agent_file in "$AGENTS_DIR"/*.json; do
-    [ -f "$agent_file" ] || continue
-    session_id=$(jq -r '.sessionId // ""' "$agent_file" 2>/dev/null)
-    if [ -n "$session_id" ]; then
-      ((active_count++)) || true
-    fi
-  done
-
-  # Only clean up if no active agents remain
-  if [ "$active_count" -eq 0 ]; then
-    rm -rf "$HIVEMIND_DIR"
+if [[ "$ACTIVE_COUNT" == "0" ]]; then
+  # No active agents - remove database file for clean slate
+  DB_PATH="$HIVEMIND_DIR/hive.db"
+  if [[ -f "$DB_PATH" ]]; then
+    rm -f "$DB_PATH"
+    rm -f "$DB_PATH.wal" 2>/dev/null || true
   fi
 fi
 
