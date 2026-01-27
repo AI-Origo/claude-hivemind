@@ -1,6 +1,6 @@
 -- send-keystroke.scpt - Send a keystroke message to an iTerm2 session by TTY
 -- Usage: osascript send-keystroke.scpt <tty> [message]
--- Example: osascript send-keystroke.scpt /dev/ttys007 "Task incoming, please complete the delegated task."
+-- Example: osascript send-keystroke.scpt /dev/ttys007 "New message!                "
 
 on run argv
     -- Parse arguments
@@ -14,7 +14,7 @@ on run argv
     if (count of argv) >= 2 then
         set messageText to item 2 of argv
     else
-        set messageText to "Task incoming, please complete the delegated task."
+        set messageText to "New message!                "
     end if
 
     set foundSession to false

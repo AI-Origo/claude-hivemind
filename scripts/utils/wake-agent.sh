@@ -2,7 +2,7 @@
 # wake-agent.sh - Wake an idle agent by sending a message to their iTerm2 session
 #
 # Usage: wake-agent.sh <tty> [message]
-# Example: wake-agent.sh /dev/ttys007 "Task incoming, please complete the delegated task."
+# Example: wake-agent.sh /dev/ttys007 "New message!                "
 
 set -u
 
@@ -15,7 +15,7 @@ if [[ $# -lt 1 ]]; then
 fi
 
 TTY="$1"
-MESSAGE="${2:-Task incoming, please complete the delegated task.}"
+MESSAGE="${2:-New message!                }"
 
 # Run the AppleScript
 osascript "$SCRIPT_DIR/send-keystroke.scpt" "$TTY" "$MESSAGE"
