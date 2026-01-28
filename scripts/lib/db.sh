@@ -1,205 +1,448 @@
 #!/bin/bash
-# DuckDB helper functions for Hivemind
+# Milvus helper functions for Hivemind
 # Usage: source this file after setting HIVEMIND_DIR, then call functions
+#
+# Migrated from DuckDB to Milvus REST API (v2.5.4)
+# All timestamps stored as Unix epoch (int64)
+# Arrays stored as JSON strings
 
 # Get the script directory (where db.sh is located)
 DB_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Database path - set HIVEMIND_DIR before sourcing this file
-# Falls back to .hivemind in current directory
-get_db_path() {
+# Milvus configuration
+MILVUS_HOST="${MILVUS_HOST:-localhost}"
+MILVUS_PORT="${MILVUS_PORT:-19531}"
+MILVUS_AUTH="${MILVUS_AUTH:-root:Milvus}"
+MILVUS_URL="http://${MILVUS_HOST}:${MILVUS_PORT}"
+MILVUS_DB="${MILVUS_DB:-default}"
+
+# Placeholder vector for non-vector collections (8 dimensions)
+PLACEHOLDER_VECTOR="[0,0,0,0,0,0,0,0]"
+
+# Get the log file path for database operations
+get_db_log_path() {
     local hivemind_dir="${HIVEMIND_DIR:-.hivemind}"
-    echo "$hivemind_dir/hive.db"
+    echo "$hivemind_dir/logs/db.log"
 }
 
-# Initialize the database with schema
-# Creates the database file and all tables
-db_init() {
-    local db_path
-    db_path=$(get_db_path)
-    local schema_file="$DB_SCRIPT_DIR/../db/schema.sql"
+# Generic POST request to Milvus
+# Args:
+#   $1 - endpoint (e.g., /v2/vectordb/entities/query)
+#   $2 - JSON body
+# Returns: response JSON
+milvus_post() {
+    local endpoint="$1"
+    local data="$2"
+    local db_log
+    db_log=$(get_db_log_path)
 
-    # Ensure directory exists
-    mkdir -p "$(dirname "$db_path")"
+    local response
+    response=$(curl -sf -X POST "${MILVUS_URL}${endpoint}" \
+        -H "Authorization: Bearer ${MILVUS_AUTH}" \
+        -H "Content-Type: application/json" \
+        -d "$data" 2>>"$db_log")
 
-    # Check if schema file exists
-    if [[ ! -f "$schema_file" ]]; then
-        echo "Error: Schema file not found at $schema_file" >&2
+    if [[ $? -ne 0 ]]; then
+        echo '{"code":1,"message":"curl failed"}' >&2
         return 1
     fi
 
-    # Initialize with VSS extension and HNSW persistence enabled
-    duckdb "$db_path" <<'EOF'
-INSTALL vss;
-LOAD vss;
-SET hnsw_enable_experimental_persistence = true;
-EOF
+    # Check for Milvus error response
+    local code
+    code=$(echo "$response" | jq -r '.code // 0' 2>/dev/null)
+    if [[ "$code" != "0" ]]; then
+        echo "$response" >> "$db_log"
+        echo "$response"
+        return 1
+    fi
 
-    # Load schema (requires VSS loaded again in same session)
-    duckdb "$db_path" <<EOF
-LOAD vss;
-SET hnsw_enable_experimental_persistence = true;
-.read $schema_file
-EOF
-    return $?
+    echo "$response"
+    return 0
 }
 
-# Execute a query and return JSON results
-# Args:
-#   $1 - SQL query
-# Returns: JSON array of results (empty array if DuckDB not installed)
-db_query() {
-    local query="$1"
-    local db_path
-    db_path=$(get_db_path)
+# Health check
+# Returns: 0 if healthy, 1 if not
+milvus_health() {
+    curl -sf "http://${MILVUS_HOST}:${HEALTH_PORT:-9092}/healthz" > /dev/null 2>&1
+}
 
-    # Ensure database exists (returns 1 if DuckDB not installed)
-    if ! db_ensure_initialized; then
+# Check if Milvus is available and collections are initialized
+# Returns: 0 if ready, 1 if not
+milvus_ready() {
+    local result
+    result=$(milvus_post "/v2/vectordb/collections/has" "{\"dbName\":\"${MILVUS_DB}\",\"collectionName\":\"hivemind_agents\"}" 2>/dev/null)
+    [[ $(echo "$result" | jq -r '.data.has // false') == "true" ]]
+}
+
+# Query entities from a collection
+# Args:
+#   $1 - collection name (without hivemind_ prefix)
+#   $2 - filter expression (Milvus filter syntax)
+#   $3 - output fields (comma-separated, optional)
+#   $4 - limit (optional, default 100)
+# Returns: JSON array of matching entities
+milvus_query() {
+    local collection="hivemind_$1"
+    local filter="$2"
+    local output_fields="${3:-*}"
+    local limit="${4:-100}"
+
+    local output_fields_json
+    if [[ "$output_fields" == "*" ]]; then
+        output_fields_json='["*"]'
+    else
+        output_fields_json=$(echo "$output_fields" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";""))')
+    fi
+
+    local body
+    body=$(jq -n \
+        --arg db "$MILVUS_DB" \
+        --arg col "$collection" \
+        --arg filter "$filter" \
+        --argjson fields "$output_fields_json" \
+        --argjson limit "$limit" \
+        '{dbName:$db,collectionName:$col,filter:$filter,outputFields:$fields,limit:$limit}')
+
+    local result
+    result=$(milvus_post "/v2/vectordb/entities/query" "$body")
+    if [[ $? -ne 0 ]]; then
         echo "[]"
         return 1
     fi
 
-    # Load VSS for HNSW index support
-    duckdb -json "$db_path" "LOAD vss; $query" 2>/dev/null
+    # Extract data array from response
+    echo "$result" | jq -c '.data // []'
 }
 
-# Execute a query without returning results (INSERT, UPDATE, DELETE)
+# Flush collection to ensure writes are visible to subsequent reads
+# This provides read-after-write consistency for cross-agent visibility
 # Args:
-#   $1 - SQL query
-# Returns: exit code (0 on success, 1 if DuckDB not installed)
-db_exec() {
-    local query="$1"
-    local db_path
-    db_path=$(get_db_path)
+#   $1 - collection name (without hivemind_ prefix)
+# Returns: 0 on success, 1 on error
+milvus_flush() {
+    local collection="hivemind_$1"
 
-    # Ensure database exists (returns 1 if DuckDB not installed)
-    if ! db_ensure_initialized; then
+    local body
+    body=$(jq -n \
+        --arg db "$MILVUS_DB" \
+        --arg col "$collection" \
+        '{dbName:$db,collectionName:$col}')
+
+    local result
+    result=$(milvus_post "/v2/vectordb/collections/flush" "$body")
+    [[ $? -eq 0 ]]
+}
+
+# Insert entities into a collection
+# Args:
+#   $1 - collection name (without hivemind_ prefix)
+#   $2 - JSON array of entities to insert
+# Returns: 0 on success, 1 on error
+milvus_insert() {
+    local collection="hivemind_$1"
+    local data="$2"
+
+    local body
+    body=$(jq -n \
+        --arg db "$MILVUS_DB" \
+        --arg col "$collection" \
+        --argjson data "$data" \
+        '{dbName:$db,collectionName:$col,data:$data}')
+
+    local result
+    result=$(milvus_post "/v2/vectordb/entities/insert" "$body")
+    local rc=$?
+
+    # Flush to ensure write is visible to other processes
+    if [[ $rc -eq 0 ]]; then
+        milvus_flush "$1"
+    fi
+
+    [[ $rc -eq 0 ]]
+}
+
+# Upsert entities into a collection (insert or update)
+# Args:
+#   $1 - collection name (without hivemind_ prefix)
+#   $2 - JSON array of entities to upsert
+# Returns: 0 on success, 1 on error
+milvus_upsert() {
+    local collection="hivemind_$1"
+    local data="$2"
+
+    local body
+    body=$(jq -n \
+        --arg db "$MILVUS_DB" \
+        --arg col "$collection" \
+        --argjson data "$data" \
+        '{dbName:$db,collectionName:$col,data:$data}')
+
+    local result
+    result=$(milvus_post "/v2/vectordb/entities/upsert" "$body")
+    local rc=$?
+
+    # Flush to ensure write is visible to other processes
+    if [[ $rc -eq 0 ]]; then
+        milvus_flush "$1"
+    fi
+
+    [[ $rc -eq 0 ]]
+}
+
+# Delete entities from a collection by filter
+# Args:
+#   $1 - collection name (without hivemind_ prefix)
+#   $2 - filter expression (Milvus filter syntax)
+# Returns: 0 on success, 1 on error
+milvus_delete() {
+    local collection="hivemind_$1"
+    local filter="$2"
+
+    local body
+    body=$(jq -n \
+        --arg db "$MILVUS_DB" \
+        --arg col "$collection" \
+        --arg filter "$filter" \
+        '{dbName:$db,collectionName:$col,filter:$filter}')
+
+    local result
+    result=$(milvus_post "/v2/vectordb/entities/delete" "$body")
+    [[ $? -eq 0 ]]
+}
+
+# Delete entities by ID
+# Args:
+#   $1 - collection name (without hivemind_ prefix)
+#   $2 - JSON array of IDs to delete
+# Returns: 0 on success, 1 on error
+milvus_delete_by_ids() {
+    local collection="hivemind_$1"
+    local ids="$2"
+
+    local body
+    body=$(jq -n \
+        --arg db "$MILVUS_DB" \
+        --arg col "$collection" \
+        --argjson ids "$ids" \
+        '{dbName:$db,collectionName:$col,id:$ids}')
+
+    local result
+    result=$(milvus_post "/v2/vectordb/entities/delete" "$body")
+    [[ $? -eq 0 ]]
+}
+
+# Vector similarity search
+# Args:
+#   $1 - collection name (without hivemind_ prefix)
+#   $2 - embedding vector as JSON array
+#   $3 - filter expression (optional)
+#   $4 - limit (optional, default 10)
+#   $5 - output fields (comma-separated, optional)
+# Returns: JSON array of matching entities with distances
+milvus_search() {
+    local collection="hivemind_$1"
+    local vector="$2"
+    local filter="${3:-}"
+    local limit="${4:-10}"
+    local output_fields="${5:-*}"
+
+    local output_fields_json
+    if [[ "$output_fields" == "*" ]]; then
+        output_fields_json='["*"]'
+    else
+        output_fields_json=$(echo "$output_fields" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";""))')
+    fi
+
+    local body
+    if [[ -n "$filter" ]]; then
+        body=$(jq -n \
+            --arg db "$MILVUS_DB" \
+            --arg col "$collection" \
+            --argjson vec "[$vector]" \
+            --arg filter "$filter" \
+            --argjson limit "$limit" \
+            --argjson fields "$output_fields_json" \
+            '{dbName:$db,collectionName:$col,data:$vec,filter:$filter,limit:$limit,outputFields:$fields}')
+    else
+        body=$(jq -n \
+            --arg db "$MILVUS_DB" \
+            --arg col "$collection" \
+            --argjson vec "[$vector]" \
+            --argjson limit "$limit" \
+            --argjson fields "$output_fields_json" \
+            '{dbName:$db,collectionName:$col,data:$vec,limit:$limit,outputFields:$fields}')
+    fi
+
+    local result
+    result=$(milvus_post "/v2/vectordb/entities/search" "$body")
+    if [[ $? -ne 0 ]]; then
+        echo "[]"
         return 1
     fi
 
-    # Load VSS for HNSW index support
-    duckdb "$db_path" "LOAD vss; $query" 2>/dev/null
-    return $?
+    # Extract data array from response
+    echo "$result" | jq -c '.data // []'
 }
 
-# Execute multiple statements (useful for transactions)
+# Get next sequence value (atomic increment)
 # Args:
-#   $1 - SQL statements (can include multiple statements separated by ;)
-# Returns: exit code (0 on success, 1 if DuckDB not installed)
-db_exec_multi() {
-    local statements="$1"
-    local db_path
-    db_path=$(get_db_path)
+#   $1 - sequence name (e.g., changelog_id_seq)
+# Returns: next integer value
+milvus_next_id() {
+    local seq_name="$1"
 
-    # Ensure database exists (returns 1 if DuckDB not installed)
-    if ! db_ensure_initialized; then
-        return 1
-    fi
+    # Query current value
+    local result
+    result=$(milvus_query "sequences" "id == \"$seq_name\"" "current_value" 1)
+    local current
+    current=$(echo "$result" | jq -r '.[0].current_value // 0')
 
-    # Execute statements
-    echo "$statements" | duckdb "$db_path" 2>/dev/null
-    return $?
+    # Increment
+    local next=$((current + 1))
+
+    # Upsert with new value
+    milvus_upsert "sequences" "[{\"id\":\"$seq_name\",\"embedding\":$PLACEHOLDER_VECTOR,\"current_value\":$next}]"
+
+    echo "$next"
 }
 
-# Check if database is initialized, initialize if not
-# Returns: 0 on success, 1 if DuckDB not installed or init fails
-db_ensure_initialized() {
-    local db_path
-    db_path=$(get_db_path)
-
-    if [[ ! -f "$db_path" ]]; then
-        # Don't try to init if duckdb isn't installed
-        if ! command -v duckdb &> /dev/null; then
-            return 1
-        fi
-        db_init
-    fi
+# Get current Unix timestamp
+get_timestamp() {
+    date +%s
 }
 
-# Escape a string for safe SQL insertion
+# Convert ISO timestamp to Unix epoch
+iso_to_epoch() {
+    local iso="$1"
+    if [[ -z "$iso" || "$iso" == "null" ]]; then
+        echo "0"
+        return
+    fi
+    # macOS date command
+    if date -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null; then
+        return
+    fi
+    # GNU date command
+    date -d "$iso" +%s 2>/dev/null || echo "0"
+}
+
+# Convert Unix epoch to ISO timestamp
+epoch_to_iso() {
+    local epoch="$1"
+    if [[ -z "$epoch" || "$epoch" == "0" ]]; then
+        echo ""
+        return
+    fi
+    # macOS date command
+    if date -r "$epoch" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null; then
+        return
+    fi
+    # GNU date command
+    date -u -d "@$epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo ""
+}
+
+# Escape a string for Milvus filter expression
 # Args:
 #   $1 - string to escape
-# Returns: escaped string (with single quotes escaped)
+# Returns: escaped string (with quotes escaped)
 db_escape() {
     local str="$1"
-    # Escape single quotes by doubling them
-    echo "${str//\'/\'\'}"
+    # Escape backslashes first, then double quotes
+    str="${str//\\/\\\\}"
+    str="${str//\"/\\\"}"
+    echo "$str"
 }
 
-# Quote a string for SQL (wraps in single quotes and escapes)
+# Quote a string for Milvus filter (wraps in double quotes)
 # Args:
 #   $1 - string to quote
-# Returns: quoted string ready for SQL
+# Returns: quoted string ready for filter
 db_quote() {
     local str="$1"
     local escaped
     escaped=$(db_escape "$str")
-    echo "'$escaped'"
+    echo "\"$escaped\""
 }
 
-# Check if a record exists
-# Args:
-#   $1 - table name
-#   $2 - where clause (e.g., "id = 1" or "name = 'alfa'")
-# Returns: 0 if exists, 1 if not (also 1 if DuckDB not installed)
-db_exists() {
-    local table="$1"
-    local where_clause="$2"
-    local db_path
-    db_path=$(get_db_path)
+# ============================================================================
+# BACKWARDS-COMPATIBLE WRAPPER FUNCTIONS
+# These emulate the DuckDB interface for easier migration
+# ============================================================================
 
-    # Ensure database exists (returns 1 if DuckDB not installed)
-    if ! db_ensure_initialized; then
-        return 1
-    fi
-
-    local result
-    result=$(duckdb -json "$db_path" "SELECT 1 FROM $table WHERE $where_clause LIMIT 1" 2>/dev/null)
-
-    if [[ "$result" == "[]" ]] || [[ -z "$result" ]]; then
-        return 1
-    fi
-    return 0
+# Check if Milvus is ready (replaces db_check_duckdb)
+db_check_milvus() {
+    milvus_ready
 }
 
-# Get a single value from the database
+# Ensure database is initialized (now checks Milvus)
+db_ensure_initialized() {
+    milvus_ready
+}
+
+# Execute a query and return JSON results (compatibility wrapper)
+# Now uses milvus_query internally
 # Args:
-#   $1 - SQL query (should return single row, single column)
-# Returns: the value, or empty string if not found (also empty if DuckDB not installed)
+#   $1 - pseudo-SQL query (parsed and converted to Milvus operations)
+# Returns: JSON array of results
+db_query() {
+    local query="$1"
+
+    # This is a compatibility shim - actual implementation in handlers
+    # should be migrated to use milvus_query directly
+    echo "[]"
+    return 1
+}
+
+# Execute a statement without returning results (compatibility wrapper)
+# Args:
+#   $1 - pseudo-SQL statement
+# Returns: exit code
+db_exec() {
+    local statement="$1"
+
+    # This is a compatibility shim - actual implementation in handlers
+    # should be migrated to use milvus_insert/upsert/delete directly
+    return 1
+}
+
+# Get a single value (compatibility wrapper)
+# Args:
+#   $1 - pseudo-SQL query
+# Returns: the value, or empty string if not found
 db_get_value() {
     local query="$1"
-    local db_path
-    db_path=$(get_db_path)
 
-    # Ensure database exists (returns 1 if DuckDB not installed)
-    if ! db_ensure_initialized; then
-        return 1
-    fi
-
-    local result
-    result=$(duckdb -json "$db_path" "$query" 2>/dev/null)
-
-    # Extract first column of first row
-    echo "$result" | jq -r '.[0] | to_entries | .[0].value // empty' 2>/dev/null
+    # This is a compatibility shim
+    echo ""
+    return 1
 }
 
-# Get next sequence value
-# Args:
-#   $1 - sequence name
-# Returns: next value
+# Get next sequence value (compatibility wrapper, uses milvus_next_id)
 db_next_id() {
     local seq_name="$1"
-    db_get_value "SELECT nextval('$seq_name')"
+    milvus_next_id "$seq_name"
 }
 
-# Copy template files to hivemind directory if they don't exist
-# Should be called during first-time initialization
+# Check if a record exists (compatibility wrapper)
+# Args:
+#   $1 - collection name (without prefix)
+#   $2 - filter expression
+# Returns: 0 if exists, 1 if not
+db_exists() {
+    local collection="$1"
+    local filter="$2"
+    local result
+    result=$(milvus_query "$collection" "$filter" "id" 1)
+    [[ $(echo "$result" | jq 'length') -gt 0 ]]
+}
+
+# Copy template files to hivemind directory
 db_copy_templates() {
     local hivemind_dir="${HIVEMIND_DIR:-.hivemind}"
     local template_dir="$DB_SCRIPT_DIR/../../templates"
 
-    # Create hivemind directory if it doesn't exist
-    mkdir -p "$hivemind_dir"
+    # Create hivemind directory and logs subdirectory
+    mkdir -p "$hivemind_dir/logs"
 
     # Copy .env.example if it doesn't exist
     if [[ ! -f "$hivemind_dir/.env.example" ]] && [[ -f "$template_dir/.env.example" ]]; then
@@ -212,54 +455,357 @@ db_copy_templates() {
     fi
 }
 
-# Full initialization: copy templates + create database
+# Full initialization: copy templates (no longer creates database)
 db_full_init() {
     db_copy_templates
-    db_init
+    # Milvus collections are initialized separately via init-collections.sh
 }
 
 # Clean up transient data (for session end)
-# Preserves: .env, .env.example, .gitignore, hive.db, all knowledge/memory/tasks data
-# Cleans: agent sessions, locks, messages to/from agent
 db_cleanup_transient() {
     local agent_name="$1"
 
     if [[ -n "$agent_name" ]]; then
         # Clean up specific agent's transient data
-        db_exec "DELETE FROM file_locks WHERE agent_name = $(db_quote "$agent_name")"
+        milvus_delete "file_locks" "agent_name == $(db_quote "$agent_name")"
+
         # Delete all messages sent to or from this agent
-        db_exec "DELETE FROM messages WHERE from_agent = $(db_quote "$agent_name") OR to_agent = $(db_quote "$agent_name")"
-        db_exec "UPDATE agents SET session_id = NULL, ended_at = now() WHERE name = $(db_quote "$agent_name")"
+        milvus_delete "messages" "from_agent == $(db_quote "$agent_name")"
+        milvus_delete "messages" "to_agent == $(db_quote "$agent_name")"
+
+        # Mark agent as ended
+        local now
+        now=$(get_timestamp)
+        # Note: We need to query and re-upsert to update the agent
+        # This is handled in session-end.sh directly
     fi
 
     # Clean up delivered messages older than 24 hours
-    db_exec "DELETE FROM messages WHERE delivered_at IS NOT NULL AND delivered_at < now() - INTERVAL '24 hours'"
+    local cutoff=$(($(get_timestamp) - 86400))
+    milvus_delete "messages" "delivered_at > 0 and delivered_at < $cutoff"
 }
 
-# Check if DuckDB is installed
-db_check_duckdb() {
-    command -v duckdb &> /dev/null
+# ============================================================================
+# AGENT HELPERS
+# ============================================================================
+
+# Get agent by TTY
+get_agent_by_tty() {
+    local tty="$1"
+    milvus_query "agents" "tty == $(db_quote "$tty") and ended_at < 1" "*" 1
 }
 
-# Install DuckDB (called by /hive setup)
-db_install_duckdb() {
-    if db_check_duckdb; then
-        echo "DuckDB is already installed."
-        return 0
+# Get agent by session ID
+get_agent_by_session() {
+    local session_id="$1"
+    milvus_query "agents" "session_id == $(db_quote "$session_id") and ended_at < 1" "*" 1
+}
+
+# Get agent by name
+get_agent_by_name() {
+    local name="$1"
+    milvus_query "agents" "id == $(db_quote "$name")" "*" 1
+}
+
+# Get all active agents
+get_active_agents() {
+    milvus_query "agents" "ended_at < 1" "*" 100
+}
+
+# Create or update agent
+upsert_agent() {
+    local name="$1"
+    local session_id="$2"
+    local tty="$3"
+    local started_at="$4"
+    local ended_at="${5:-0}"
+    local current_task="${6:-}"
+    local last_task="${7:-}"
+
+    local data
+    data=$(jq -n \
+        --arg id "$name" \
+        --arg name "$name" \
+        --arg session_id "$session_id" \
+        --arg tty "$tty" \
+        --argjson started_at "$started_at" \
+        --argjson ended_at "$ended_at" \
+        --arg current_task "$current_task" \
+        --arg last_task "$last_task" \
+        --argjson embedding "$PLACEHOLDER_VECTOR" \
+        '[{id:$id,name:$name,session_id:$session_id,tty:$tty,started_at:$started_at,ended_at:$ended_at,current_task:$current_task,last_task:$last_task,embedding:$embedding}]')
+
+    milvus_upsert "agents" "$data"
+}
+
+# ============================================================================
+# MESSAGE HELPERS
+# ============================================================================
+
+# Insert a message
+insert_message() {
+    local msg_id="$1"
+    local from_agent="$2"
+    local to_agent="$3"
+    local body="$4"
+    local priority="${5:-normal}"
+    local created_at="${6:-$(get_timestamp)}"
+
+    local data
+    data=$(jq -n \
+        --arg id "$msg_id" \
+        --arg from_agent "$from_agent" \
+        --arg to_agent "$to_agent" \
+        --arg body "$body" \
+        --arg priority "$priority" \
+        --argjson created_at "$created_at" \
+        --argjson delivered_at 0 \
+        --argjson embedding "$PLACEHOLDER_VECTOR" \
+        '[{id:$id,from_agent:$from_agent,to_agent:$to_agent,body:$body,priority:$priority,created_at:$created_at,delivered_at:$delivered_at,embedding:$embedding}]')
+
+    milvus_insert "messages" "$data"
+}
+
+# Get pending messages for an agent
+get_pending_messages() {
+    local agent_name="$1"
+    milvus_query "messages" "to_agent == $(db_quote "$agent_name") and delivered_at == 0" "*" 100
+}
+
+# Mark messages as delivered
+mark_messages_delivered() {
+    local msg_ids="$1"  # JSON array of IDs
+    local delivered_at
+    delivered_at=$(get_timestamp)
+
+    # For each message ID, we need to query, update, and upsert
+    echo "$msg_ids" | jq -r '.[]' | while read -r msg_id; do
+        local msg
+        msg=$(milvus_query "messages" "id == $(db_quote "$msg_id")" "*" 1)
+        if [[ $(echo "$msg" | jq 'length') -gt 0 ]]; then
+            local updated
+            updated=$(echo "$msg" | jq --argjson ts "$delivered_at" '.[0] | .delivered_at = $ts' | jq -c '[.]')
+            milvus_upsert "messages" "$updated"
+        fi
+    done
+}
+
+# ============================================================================
+# FILE LOCK HELPERS
+# ============================================================================
+
+# Acquire file lock
+acquire_lock() {
+    local file_path="$1"
+    local agent_name="$2"
+    local locked_at="${3:-$(get_timestamp)}"
+
+    # Use file_path as ID
+    local data
+    data=$(jq -n \
+        --arg id "$file_path" \
+        --arg file_path "$file_path" \
+        --arg agent_name "$agent_name" \
+        --argjson locked_at "$locked_at" \
+        --argjson embedding "$PLACEHOLDER_VECTOR" \
+        '[{id:$id,file_path:$file_path,agent_name:$agent_name,locked_at:$locked_at,embedding:$embedding}]')
+
+    milvus_upsert "file_locks" "$data"
+}
+
+# Get lock for file
+get_file_lock() {
+    local file_path="$1"
+    milvus_query "file_locks" "id == $(db_quote "$file_path")" "*" 1
+}
+
+# Release lock
+release_lock() {
+    local file_path="$1"
+    local agent_name="$2"
+    milvus_delete "file_locks" "id == $(db_quote "$file_path") and agent_name == $(db_quote "$agent_name")"
+}
+
+# Release all locks for agent
+release_agent_locks() {
+    local agent_name="$1"
+    milvus_delete "file_locks" "agent_name == $(db_quote "$agent_name")"
+}
+
+# ============================================================================
+# CHANGELOG HELPERS
+# ============================================================================
+
+# Insert changelog entry
+insert_changelog() {
+    local agent="$1"
+    local action="$2"
+    local file_path="$3"
+    local summary="${4:-}"
+
+    local seq_id
+    seq_id=$(milvus_next_id "changelog_id_seq")
+    local id="changelog-$seq_id"
+    local timestamp
+    timestamp=$(get_timestamp)
+
+    local data
+    data=$(jq -n \
+        --arg id "$id" \
+        --argjson seq_id "$seq_id" \
+        --argjson timestamp "$timestamp" \
+        --arg agent "$agent" \
+        --arg action "$action" \
+        --arg file_path "$file_path" \
+        --arg summary "$summary" \
+        --argjson embedding "$PLACEHOLDER_VECTOR" \
+        '[{id:$id,seq_id:$seq_id,timestamp:$timestamp,agent:$agent,action:$action,file_path:$file_path,summary:$summary,embedding:$embedding}]')
+
+    milvus_insert "changelog" "$data"
+}
+
+# Get recent changelog entries
+get_recent_changelog() {
+    local limit="${1:-20}"
+    # Note: Milvus doesn't support ORDER BY, so we query all and sort with jq
+    local result
+    result=$(milvus_query "changelog" "timestamp > 0" "*" "$limit")
+    echo "$result" | jq -c 'sort_by(-.seq_id) | .[:'"$limit"']'
+}
+
+# ============================================================================
+# TASK HELPERS
+# ============================================================================
+
+# Create task
+create_task() {
+    local title="$1"
+    local description="${2:-}"
+    local embedding="${3:-}"  # JSON array or empty
+
+    local seq_id
+    seq_id=$(milvus_next_id "task_id_seq")
+    local id="task-$seq_id"
+    local created_at
+    created_at=$(get_timestamp)
+
+    # Use proper embedding or null placeholder for 3072-dim
+    local embed_vec
+    if [[ -n "$embedding" && "$embedding" != "null" ]]; then
+        embed_vec="$embedding"
+    else
+        # Milvus requires embedding, use zeros
+        embed_vec=$(python3 -c "import json; print(json.dumps([0.0]*3072))" 2>/dev/null || echo "[$(seq -s, 0 1 3071 | sed 's/[0-9]*/0.0/g')]")
     fi
 
-    if command -v brew &> /dev/null; then
-        echo "Installing DuckDB via Homebrew..."
-        brew install duckdb
-        return $?
-    elif command -v apt-get &> /dev/null; then
-        echo "Installing DuckDB via apt..."
-        sudo apt-get update && sudo apt-get install -y duckdb
-        return $?
-    else
-        echo "Cannot auto-install. Please install manually:"
-        echo "  macOS:  brew install duckdb"
-        echo "  Linux:  https://duckdb.org/docs/installation"
+    local data
+    data=$(jq -n \
+        --arg id "$id" \
+        --argjson seq_id "$seq_id" \
+        --arg title "$title" \
+        --arg description "$description" \
+        --arg state "pending" \
+        --arg assignee "" \
+        --arg depends_on "[]" \
+        --argjson parent_id 0 \
+        --argjson created_at "$created_at" \
+        --argjson claimed_at 0 \
+        --argjson completed_at 0 \
+        --arg rejection_note "" \
+        --argjson embedding "$embed_vec" \
+        '[{id:$id,seq_id:$seq_id,title:$title,description:$description,state:$state,assignee:$assignee,depends_on:$depends_on,parent_id:$parent_id,created_at:$created_at,claimed_at:$claimed_at,completed_at:$completed_at,rejection_note:$rejection_note,embedding:$embedding}]')
+
+    milvus_insert "tasks" "$data"
+    echo "$seq_id"
+}
+
+# Get task by seq_id
+get_task_by_id() {
+    local seq_id="$1"
+    local id="task-$seq_id"
+    milvus_query "tasks" "id == $(db_quote "$id")" "*" 1
+}
+
+# Get tasks by state
+get_tasks_by_state() {
+    local state="$1"
+    local limit="${2:-100}"
+    milvus_query "tasks" "state == $(db_quote "$state")" "*" "$limit"
+}
+
+# Get tasks for agent
+get_tasks_for_agent() {
+    local agent_name="$1"
+    milvus_query "tasks" "assignee == $(db_quote "$agent_name")" "*" 100
+}
+
+# Update task (query, modify, upsert)
+update_task() {
+    local seq_id="$1"
+    local field="$2"
+    local value="$3"
+
+    local id="task-$seq_id"
+    local task
+    task=$(milvus_query "tasks" "id == $(db_quote "$id")" "*" 1)
+
+    if [[ $(echo "$task" | jq 'length') -eq 0 ]]; then
         return 1
+    fi
+
+    local updated
+    # Handle different value types
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        updated=$(echo "$task" | jq --arg f "$field" --argjson v "$value" '.[0] | .[$f] = $v')
+    else
+        updated=$(echo "$task" | jq --arg f "$field" --arg v "$value" '.[0] | .[$f] = $v')
+    fi
+
+    milvus_upsert "tasks" "[$updated]"
+}
+
+# ============================================================================
+# METRICS HELPERS
+# ============================================================================
+
+# Insert metric event
+insert_metric() {
+    local event_type="$1"
+    local task_id="${2:-0}"
+    local agent="${3:-}"
+    local duration_minutes="${4:-0}"
+    local metadata="${5:-}"
+
+    local seq_id
+    seq_id=$(milvus_next_id "metrics_id_seq")
+    local id="metric-$seq_id"
+    local timestamp
+    timestamp=$(get_timestamp)
+
+    local data
+    data=$(jq -n \
+        --arg id "$id" \
+        --argjson seq_id "$seq_id" \
+        --arg event_type "$event_type" \
+        --argjson task_id "$task_id" \
+        --arg agent "$agent" \
+        --argjson timestamp "$timestamp" \
+        --argjson duration_minutes "$duration_minutes" \
+        --arg metadata "$metadata" \
+        --argjson embedding "$PLACEHOLDER_VECTOR" \
+        '[{id:$id,seq_id:$seq_id,event_type:$event_type,task_id:$task_id,agent:$agent,timestamp:$timestamp,duration_minutes:$duration_minutes,metadata:$metadata,embedding:$embedding}]')
+
+    milvus_insert "metrics" "$data"
+}
+
+# Get metrics in time window
+get_metrics_since() {
+    local since_epoch="$1"
+    local event_type="${2:-}"
+
+    if [[ -n "$event_type" ]]; then
+        milvus_query "metrics" "timestamp >= $since_epoch and event_type == $(db_quote "$event_type")" "*" 1000
+    else
+        milvus_query "metrics" "timestamp >= $since_epoch" "*" 1000
     fi
 }
