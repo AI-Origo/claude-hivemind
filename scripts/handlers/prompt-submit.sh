@@ -2,8 +2,8 @@
 # prompt-submit.sh - Deliver pending messages and inject identity
 #
 # On UserPromptSubmit:
-# 1. Look up this agent via database
-# 2. Check for unread messages in database
+# 1. Look up this agent via Milvus
+# 2. Check for unread messages in Milvus
 # 3. Inject identity, messages, and task reminders as context
 
 set -uo pipefail
@@ -48,7 +48,7 @@ get_current_tty() {
   echo "$tty"
 }
 
-# Look up agent name using TTY first, then session_id from database
+# Look up agent name using TTY first, then session_id
 lookup_agent_name() {
   local tty="$1"
   local session_id="$2"
@@ -56,12 +56,12 @@ lookup_agent_name() {
 
   # Try TTY first (most stable)
   if [[ -n "$tty" ]]; then
-    agent_name=$(db_query "SELECT name FROM agents WHERE tty = $(db_quote "$tty") LIMIT 1" | jq -r '.[0].name // empty')
+    agent_name=$(get_agent_by_tty "$tty" | jq -r '.[0].name // empty')
   fi
 
   # Fall back to session_id
   if [[ -z "$agent_name" && -n "$session_id" ]]; then
-    agent_name=$(db_query "SELECT name FROM agents WHERE session_id = $(db_quote "$session_id") LIMIT 1" | jq -r '.[0].name // empty')
+    agent_name=$(get_agent_by_session "$session_id" | jq -r '.[0].name // empty')
   fi
 
   echo "$agent_name"
@@ -85,24 +85,26 @@ if [ -z "$HIVEMIND_DIR" ]; then
 fi
 export HIVEMIND_DIR
 
-# Ensure database is initialized
-db_ensure_initialized
+# Check if Milvus is available
+if ! milvus_ready; then
+  exit 0
+fi
 
 # Get TTY for stable identity lookup
 AGENT_TTY=$(get_current_tty)
 
-# Look up agent name from database
+# Look up agent name
 AGENT_NAME=$(lookup_agent_name "$AGENT_TTY" "$SESSION_ID")
 if [ -z "$AGENT_NAME" ]; then
   exit 0
 fi
 
-# Query pending messages from database
+# Query pending messages from Milvus
 MESSAGES=""
-messages_json=$(db_query "SELECT id, from_agent, body, priority, created_at FROM messages WHERE to_agent = $(db_quote "$AGENT_NAME") AND delivered_at IS NULL ORDER BY created_at")
+messages_json=$(get_pending_messages "$AGENT_NAME")
 
 # Process each message
-message_ids=""
+message_ids="[]"
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   msg_id=$(echo "$line" | jq -r '.id // empty')
@@ -111,7 +113,8 @@ while IFS= read -r line; do
   from=$(echo "$line" | jq -r '.from_agent // "unknown"')
   body=$(echo "$line" | jq -r '.body // ""')
   priority=$(echo "$line" | jq -r '.priority // "normal"')
-  ts=$(echo "$line" | jq -r '.created_at // ""')
+  ts_epoch=$(echo "$line" | jq -r '.created_at // 0')
+  ts=$(epoch_to_iso "$ts_epoch")
 
   priority_prefix=""
   [ "$priority" = "urgent" ] && priority_prefix="[URGENT] "
@@ -123,16 +126,12 @@ while IFS= read -r line; do
   MESSAGES="${MESSAGES}${priority_prefix}[HIVE AGENT MESSAGE] From $from ($ts): $body"
 
   # Collect message IDs for marking as delivered
-  if [[ -n "$message_ids" ]]; then
-    message_ids="${message_ids}, $(db_quote "$msg_id")"
-  else
-    message_ids="$(db_quote "$msg_id")"
-  fi
+  message_ids=$(echo "$message_ids" | jq --arg id "$msg_id" '. + [$id]')
 done < <(echo "$messages_json" | jq -c '.[]' 2>/dev/null || echo "")
 
 # Mark messages as delivered
-if [[ -n "$message_ids" ]]; then
-  db_exec "UPDATE messages SET delivered_at = now() WHERE id IN ($message_ids)"
+if [[ $(echo "$message_ids" | jq 'length') -gt 0 ]]; then
+  mark_messages_delivered "$message_ids"
 fi
 
 # Output messages if any
@@ -143,11 +142,12 @@ if [ -n "$MESSAGES" ]; then
 fi
 
 # Check for claimed tasks assigned to this agent
-claimed_tasks=$(db_query "SELECT id, title, state FROM tasks WHERE assignee = $(db_quote "$AGENT_NAME") AND state IN ('claimed', 'in_progress') ORDER BY id")
+claimed_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$AGENT_NAME") and (state == \"claimed\" or state == \"in_progress\")" "seq_id,title,state" 100)
+claimed_tasks=$(echo "$claimed_tasks" | jq -c 'sort_by(.seq_id)')
 TASK_REMINDER=""
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
-  task_id=$(echo "$line" | jq -r '.id // empty')
+  task_id=$(echo "$line" | jq -r '.seq_id // empty')
   [[ -z "$task_id" ]] && continue
 
   task_title=$(echo "$line" | jq -r '.title // ""')
@@ -160,11 +160,12 @@ while IFS= read -r line; do
 done < <(echo "$claimed_tasks" | jq -c '.[]' 2>/dev/null || echo "")
 
 # Check for tasks in review that this agent might want to review
-review_tasks=$(db_query "SELECT id, title, assignee FROM tasks WHERE state = 'review' AND assignee != $(db_quote "$AGENT_NAME") ORDER BY id LIMIT 3")
+review_tasks=$(milvus_query "tasks" "state == \"review\" and assignee != $(db_quote "$AGENT_NAME")" "seq_id,title,assignee" 3)
+review_tasks=$(echo "$review_tasks" | jq -c 'sort_by(.seq_id)')
 REVIEW_REMINDER=""
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
-  task_id=$(echo "$line" | jq -r '.id // empty')
+  task_id=$(echo "$line" | jq -r '.seq_id // empty')
   [[ -z "$task_id" ]] && continue
 
   task_title=$(echo "$line" | jq -r '.title // ""')

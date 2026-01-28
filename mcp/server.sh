@@ -1,6 +1,6 @@
 #!/bin/bash
 # Hivemind MCP Server - All commands as deterministic tools
-# Pure bash - only requires jq
+# Pure bash - only requires jq and curl
 #
 # This server provides:
 # - hive_whoami - Get your agent name
@@ -59,14 +59,13 @@ log "HIVEMIND_DIR exists: $(test -d "$HIVEMIND_DIR" && echo yes || echo no)"
 export HIVEMIND_DIR
 source "$SCRIPT_DIR/../scripts/lib/db.sh"
 
-# Check DuckDB availability at startup
-HAS_DUCKDB=false
-if command -v duckdb &> /dev/null; then
-  if db_ensure_initialized; then
-    HAS_DUCKDB=true
-  else
-    log "DuckDB installed but database initialization failed"
-  fi
+# Check Milvus availability at startup
+HAS_MILVUS=false
+if milvus_ready; then
+  HAS_MILVUS=true
+  log "Milvus is ready"
+else
+  log "Milvus not available"
 fi
 
 # Look up agent name using TTY first, then session_id
@@ -74,17 +73,17 @@ lookup_agent_name() {
   local tty="$1"
   local session_id="$2"
 
-  if [[ "$HAS_DUCKDB" != "true" ]]; then
+  if [[ "$HAS_MILVUS" != "true" ]]; then
     echo ""
     return
   fi
 
   local agent_name=""
   if [[ -n "$tty" ]]; then
-    agent_name=$(db_query "SELECT name FROM agents WHERE tty = $(db_quote "$tty") AND ended_at IS NULL LIMIT 1" | jq -r '.[0].name // empty')
+    agent_name=$(get_agent_by_tty "$tty" | jq -r '.[0].name // empty')
   fi
   if [[ -z "$agent_name" && -n "$session_id" ]]; then
-    agent_name=$(db_query "SELECT name FROM agents WHERE session_id = $(db_quote "$session_id") AND ended_at IS NULL LIMIT 1" | jq -r '.[0].name // empty')
+    agent_name=$(get_agent_by_session "$session_id" | jq -r '.[0].name // empty')
   fi
   echo "$agent_name"
 }
@@ -101,17 +100,18 @@ trap cleanup EXIT
 get_agent_status() {
   local target_agent="$1"
 
-  if [[ "$HAS_DUCKDB" != "true" ]]; then
+  if [[ "$HAS_MILVUS" != "true" ]]; then
     echo "offline"
     return
   fi
 
-  local task=$(db_query "SELECT current_task FROM agents WHERE name = $(db_quote "$target_agent") AND ended_at IS NULL" | jq -r '.[0].current_task // empty')
+  local agent_json
+  agent_json=$(milvus_query "agents" "id == $(db_quote "$target_agent") and ended_at < 1" "current_task" 1)
+  local task=$(echo "$agent_json" | jq -r '.[0].current_task // empty')
 
   if [[ -z "$task" ]]; then
     # Check if agent exists at all
-    local exists=$(db_query "SELECT 1 FROM agents WHERE name = $(db_quote "$target_agent") AND ended_at IS NULL" | jq -r '.[0] // empty')
-    if [[ -z "$exists" ]]; then
+    if [[ $(echo "$agent_json" | jq 'length') -eq 0 ]]; then
       echo "offline"
     else
       echo "idle"
@@ -126,12 +126,15 @@ get_agent_status() {
 wake_agent() {
   local target_agent="$1"
 
-  if [[ "$HAS_DUCKDB" != "true" ]]; then
-    log "wake_agent: DuckDB not available"
+  if [[ "$HAS_MILVUS" != "true" ]]; then
+    log "wake_agent: Milvus not available"
     return 1
   fi
 
-  local agent_tty=$(db_query "SELECT tty FROM agents WHERE name = $(db_quote "$target_agent") AND ended_at IS NULL" | jq -r '.[0].tty // empty')
+  local agent_json
+  agent_json=$(milvus_query "agents" "id == $(db_quote "$target_agent") and ended_at < 1" "tty" 1)
+  local agent_tty=$(echo "$agent_json" | jq -r '.[0].tty // empty')
+
   if [[ -z "$agent_tty" ]]; then
     log "wake_agent: no TTY registered for $target_agent"
     return 1
@@ -175,15 +178,15 @@ tool_whoami() {
 }
 
 tool_agents() {
-  if [[ "$HAS_DUCKDB" != "true" ]]; then
-    text_result "DuckDB not installed. Run hive_setup first."
+  if [[ "$HAS_MILVUS" != "true" ]]; then
+    text_result "Milvus not available. Run start-milvus.sh first."
     return
   fi
 
   local output="HIVEMIND AGENTS
 ===============
 "
-  local agents_json=$(db_query "SELECT name, current_task FROM agents WHERE ended_at IS NULL ORDER BY name")
+  local agents_json=$(get_active_agents)
   local count=0
 
   if [[ -n "$agents_json" && "$agents_json" != "[]" ]]; then
@@ -210,8 +213,8 @@ Total: $count agent(s)"
 }
 
 tool_status() {
-  if [[ "$HAS_DUCKDB" != "true" ]]; then
-    text_result "DuckDB not installed. Run hive_setup first."
+  if [[ "$HAS_MILVUS" != "true" ]]; then
+    text_result "Milvus not available. Run start-milvus.sh first."
     return
   fi
 
@@ -220,7 +223,7 @@ tool_status() {
 
 AGENTS
 ------"
-  local agents_json=$(db_query "SELECT name, current_task FROM agents WHERE ended_at IS NULL ORDER BY name")
+  local agents_json=$(get_active_agents)
 
   if [[ -n "$agents_json" && "$agents_json" != "[]" ]]; then
     while IFS= read -r line; do
@@ -235,21 +238,23 @@ $name
     done < <(echo "$agents_json" | jq -c '.[]')
   fi
 
-  # File locks (from database)
+  # File locks (from Milvus)
   output+="
 
 FILE LOCKS
 ----------"
-  local locks_json=$(db_query "SELECT file_path, agent_name FROM file_locks")
+  local locks_json=$(milvus_query "file_locks" "locked_at > 0" "file_path,agent_name" 100)
   local lock_count=0
 
   if [[ -n "$locks_json" && "$locks_json" != "[]" ]]; then
     while IFS= read -r lock_line; do
       [[ -z "$lock_line" ]] && continue
+      local file_path=$(echo "$lock_line" | jq -r '.file_path')
+      local agent_name=$(echo "$lock_line" | jq -r '.agent_name')
       output+="
-$lock_line"
+$file_path (held by $agent_name)"
       ((lock_count++))
-    done < <(echo "$locks_json" | jq -r '.[] | "\(.file_path) (held by \(.agent_name))"' 2>/dev/null)
+    done < <(echo "$locks_json" | jq -c '.[]')
   fi
 
   [[ $lock_count -eq 0 ]] && output+="
@@ -262,22 +267,25 @@ MESSAGES
 --------
 Messages from other agents are delivered automatically with each prompt."
 
-  # Recent changes (from database)
+  # Recent changes (from Milvus)
   output+="
 
 RECENT CHANGES
 --------------"
-  local changes_json=$(db_query "SELECT timestamp, agent, action, file_path FROM changelog ORDER BY id DESC LIMIT 5")
+  local changes_json=$(get_recent_changelog 5)
 
   if [[ -n "$changes_json" && "$changes_json" != "[]" ]]; then
-    local changes=$(echo "$changes_json" | jq -r '.[] | "[\(.timestamp | split("T")[1] | split(".")[0])] \(.agent): \(.action) \(.file_path)"' 2>/dev/null)
-    if [[ -n "$changes" ]]; then
+    while IFS= read -r change; do
+      [[ -z "$change" ]] && continue
+      local ts_epoch=$(echo "$change" | jq -r '.timestamp // 0')
+      local ts=$(epoch_to_iso "$ts_epoch")
+      local ts_time=$(echo "$ts" | cut -d'T' -f2 | cut -d'.' -f1)
+      local agent=$(echo "$change" | jq -r '.agent')
+      local action=$(echo "$change" | jq -r '.action')
+      local file_path=$(echo "$change" | jq -r '.file_path')
       output+="
-$changes"
-    else
-      output+="
-No changes recorded."
-    fi
+[$ts_time] $agent: $action $file_path"
+    done < <(echo "$changes_json" | jq -c '.[]')
   else
     output+="
 No changes recorded."
@@ -290,8 +298,8 @@ tool_message() {
   local session_id="$1" target="$2" body="$3" tty="$4"
   local msg_id="msg-$(date +%s)-$$-$RANDOM"
 
-  if [[ "$HAS_DUCKDB" != "true" ]]; then
-    text_result "DuckDB not installed. Run hive_setup first."
+  if [[ "$HAS_MILVUS" != "true" ]]; then
+    text_result "Milvus not available. Run start-milvus.sh first."
     return
   fi
 
@@ -302,10 +310,10 @@ tool_message() {
   fi
 
   if [[ "$target" == "all" ]]; then
-    # Fan-out: send individual message to each active agent (from DB)
+    # Fan-out: send individual message to each active agent (from Milvus)
     local recipient_count=0
     local recipients=""
-    local agents_json=$(db_query "SELECT name FROM agents WHERE ended_at IS NULL ORDER BY name")
+    local agents_json=$(get_active_agents)
 
     if [[ -n "$agents_json" && "$agents_json" != "[]" ]]; then
       while IFS= read -r line; do
@@ -315,10 +323,8 @@ tool_message() {
         [[ "$agent_name" == "$from_agent" ]] && continue
         # Create unique message ID for each recipient
         local recipient_msg_id="msg-$(date +%s)-$$-$RANDOM"
-        # Insert message into database
-        db_exec "INSERT INTO messages (id, from_agent, to_agent, body, priority, created_at)
-                 VALUES ($(db_quote "$recipient_msg_id"), $(db_quote "$from_agent"), $(db_quote "$agent_name"),
-                         $(db_quote "[BROADCAST] $body"), 'normal', now())"
+        # Insert message into Milvus
+        insert_message "$recipient_msg_id" "$from_agent" "$agent_name" "[BROADCAST] $body" "normal"
         ((recipient_count++))
         [[ -n "$recipients" ]] && recipients+=", "
         recipients+="$agent_name"
@@ -331,20 +337,20 @@ tool_message() {
       text_result "Broadcast sent to $recipient_count agent(s): $recipients"
     fi
   else
-    # Check if target exists in DB
-    if ! db_exists "agents" "name = $(db_quote "$target") AND ended_at IS NULL"; then
-      local available=$(db_query "SELECT name FROM agents WHERE ended_at IS NULL ORDER BY name" | jq -r '.[].name' | tr '\n' ', ' | sed 's/,$//')
+    # Check if target exists in Milvus
+    if ! db_exists "agents" "id == $(db_quote "$target") and ended_at < 1"; then
+      local available=$(get_active_agents | jq -r '.[].name' | tr '\n' ', ' | sed 's/,$//')
       text_result "Agent '$target' not found. Active agents: $available"
       return
     fi
-    # Insert message into database
-    db_exec "INSERT INTO messages (id, from_agent, to_agent, body, priority, created_at)
-             VALUES ($(db_quote "$msg_id"), $(db_quote "$from_agent"), $(db_quote "$target"),
-                     $(db_quote "$body"), 'normal', now())"
+    # Insert message into Milvus
+    insert_message "$msg_id" "$from_agent" "$target" "$body" "normal"
 
     # Check recipient status and report accordingly
     local recipient_status=$(get_agent_status "$target")
     if [[ "$recipient_status" == "idle" ]]; then
+      # Small delay to ensure Milvus write is visible before wake
+      sleep 0.1
       # Wake the idle agent
       if wake_agent "$target"; then
         text_result "Message sent to $target (idle - waking agent): \"$body\""
@@ -362,26 +368,30 @@ tool_message() {
 tool_inbox() {
   local session_id="$1" limit="$2" unread_only="$3" tty="$4"
 
-  [[ "$HAS_DUCKDB" != "true" ]] && { text_result "DuckDB not installed."; return; }
+  [[ "$HAS_MILVUS" != "true" ]] && { text_result "Milvus not available."; return; }
 
   local agent_name=$(lookup_agent_name "$tty" "$session_id")
   [[ -z "$agent_name" ]] && { text_result "Agent not registered."; return; }
 
   limit=${limit:-10}
-  local where_clause="to_agent = $(db_quote "$agent_name")"
-  [[ "$unread_only" == "true" ]] && where_clause="$where_clause AND delivered_at IS NULL"
+  local filter="to_agent == $(db_quote "$agent_name")"
+  [[ "$unread_only" == "true" ]] && filter="$filter and delivered_at == 0"
 
-  local messages=$(db_query "SELECT from_agent, body, created_at, delivered_at FROM messages WHERE $where_clause ORDER BY created_at DESC LIMIT $limit")
+  local messages=$(milvus_query "messages" "$filter" "*" "$limit")
 
   if [[ -z "$messages" || "$messages" == "[]" ]]; then
     text_result "No messages found."
   else
     local output="Your recent messages:\n"
+    # Sort by created_at descending
+    messages=$(echo "$messages" | jq -c 'sort_by(-.created_at)')
     while IFS= read -r msg; do
       local from=$(echo "$msg" | jq -r '.from_agent')
       local body=$(echo "$msg" | jq -r '.body')
-      local time=$(echo "$msg" | jq -r '.created_at')
-      local status=$([[ $(echo "$msg" | jq -r '.delivered_at') == "null" ]] && echo "[UNREAD]" || echo "")
+      local ts_epoch=$(echo "$msg" | jq -r '.created_at // 0')
+      local time=$(epoch_to_iso "$ts_epoch")
+      local delivered_at=$(echo "$msg" | jq -r '.delivered_at // 0')
+      local status=$([[ "$delivered_at" == "0" ]] && echo "[UNREAD]" || echo "")
       output+="$status From $from ($time): $body\n"
     done < <(echo "$messages" | jq -c '.[]')
     text_result "$output"
@@ -391,8 +401,8 @@ tool_inbox() {
 tool_task() {
   local session_id="$1" description="$2" tty="$3"
 
-  if [[ "$HAS_DUCKDB" != "true" ]]; then
-    text_result "DuckDB not installed. Run hive_setup first."
+  if [[ "$HAS_MILVUS" != "true" ]]; then
+    text_result "Milvus not available. Run start-milvus.sh first."
     return
   fi
 
@@ -403,20 +413,28 @@ tool_task() {
     return
   fi
 
-  # Check agent exists in DB
-  local exists=$(db_query "SELECT 1 FROM agents WHERE name = $(db_quote "$agent_name") AND ended_at IS NULL" | jq -r '.[0] // empty')
-  if [[ -z "$exists" ]]; then
+  # Get current agent data
+  local agent_json=$(milvus_query "agents" "id == $(db_quote "$agent_name")" "*" 1)
+  if [[ $(echo "$agent_json" | jq 'length') -eq 0 ]]; then
     text_result "Error: Agent not found in database"
     return
   fi
 
+  # Get existing fields
+  local session=$(echo "$agent_json" | jq -r '.[0].session_id // empty')
+  local tty_val=$(echo "$agent_json" | jq -r '.[0].tty // empty')
+  local started_at=$(echo "$agent_json" | jq -r '.[0].started_at // 0')
+  local ended_at=$(echo "$agent_json" | jq -r '.[0].ended_at // 0')
+  local current_task=$(echo "$agent_json" | jq -r '.[0].current_task // empty')
+  local last_task=$(echo "$agent_json" | jq -r '.[0].last_task // empty')
+
   if [[ -z "$description" ]]; then
     # Copy current_task to last_task before clearing
-    db_exec "UPDATE agents SET last_task = current_task, current_task = NULL WHERE name = $(db_quote "$agent_name")"
+    upsert_agent "$agent_name" "$session" "$tty_val" "$started_at" "$ended_at" "" "$current_task"
     text_result "Task cleared."
   else
     # Set new task and clear last_task
-    db_exec "UPDATE agents SET current_task = $(db_quote "$description"), last_task = NULL WHERE name = $(db_quote "$agent_name")"
+    upsert_agent "$agent_name" "$session" "$tty_val" "$started_at" "$ended_at" "$description" ""
     text_result "Task set: \"$description\""
   fi
 }
@@ -429,8 +447,8 @@ tool_changes() {
 Last $count changes:
 "
 
-  # Query changelog from database
-  local changes_json=$(db_query "SELECT timestamp, agent, action, file_path FROM changelog ORDER BY id DESC LIMIT $count")
+  # Query changelog from Milvus
+  local changes_json=$(get_recent_changelog "$count")
 
   if [[ -z "$changes_json" || "$changes_json" == "[]" ]]; then
     text_result "No changes recorded yet."
@@ -438,13 +456,17 @@ Last $count changes:
   fi
 
   # Format changes for display
-  local changes=$(echo "$changes_json" | jq -r '.[] | "[\(.timestamp | split("T")[1] | split(".")[0])] \(.agent): \(.action) \(.file_path)"' 2>/dev/null)
-
-  if [[ -n "$changes" ]]; then
-    output+="$changes"
-  else
-    output+="No changes recorded."
-  fi
+  while IFS= read -r change; do
+    [[ -z "$change" ]] && continue
+    local ts_epoch=$(echo "$change" | jq -r '.timestamp // 0')
+    local ts=$(epoch_to_iso "$ts_epoch")
+    local ts_time=$(echo "$ts" | cut -d'T' -f2 | cut -d'.' -f1)
+    local agent=$(echo "$change" | jq -r '.agent')
+    local action=$(echo "$change" | jq -r '.action')
+    local file_path=$(echo "$change" | jq -r '.file_path')
+    output+="[$ts_time] $agent: $action $file_path
+"
+  done < <(echo "$changes_json" | jq -c '.[]')
 
   text_result "$output"
 }
@@ -454,7 +476,7 @@ tool_help() {
 =================
 
 hive_setup
-  First-time setup: installs DuckDB and configures status line
+  First-time setup: starts Milvus and configures status line
   Run this once when starting with Hivemind
 
 hive_whoami
@@ -511,46 +533,23 @@ COORDINATION TIPS
 tool_setup() {
   local output=""
 
-  # Step 1: Check/Install DuckDB
-  if command -v duckdb &> /dev/null; then
-    output+="✓ DuckDB is installed ($(duckdb --version 2>/dev/null | head -1 || echo 'version unknown'))\n"
+  # Step 1: Check if Milvus is running
+  if milvus_ready; then
+    output+="✓ Milvus is ready\n"
+    HAS_MILVUS=true
   else
-    output+="Installing DuckDB...\n"
-    if command -v brew &> /dev/null; then
-      if brew install duckdb >> "$MCP_DEBUG_LOG" 2>&1; then
-        output+="✓ DuckDB installed successfully via Homebrew\n"
-      else
-        output+="✗ Failed to install DuckDB. Please install manually: brew install duckdb\n"
-      fi
-    elif command -v apt-get &> /dev/null; then
-      if sudo apt-get update >> "$MCP_DEBUG_LOG" 2>&1 && sudo apt-get install -y duckdb >> "$MCP_DEBUG_LOG" 2>&1; then
-        output+="✓ DuckDB installed successfully via apt\n"
-      else
-        output+="✗ Failed to install DuckDB. Please install manually.\n"
-      fi
-    else
-      output+="✗ Cannot auto-install DuckDB. Please install manually:\n"
-      output+="  macOS:  brew install duckdb\n"
-      output+="  Linux:  https://duckdb.org/docs/installation\n"
-    fi
+    output+="Milvus not running. Start it with:\n"
+    output+="  cd $(dirname "$HIVEMIND_DIR") && ./scripts/start-milvus.sh\n"
+    output+="\nAfter Milvus is running, run hive_setup again.\n"
+    text_result "$(echo -e "$output")"
+    return
   fi
 
-  # Step 2: Initialize database (if DuckDB now available)
-  if command -v duckdb &> /dev/null; then
-    if db_ensure_initialized; then
-      HAS_DUCKDB=true
-      output+="✓ Database initialized\n"
-    else
-      output+="✗ Database initialization failed. Check $MCP_DEBUG_LOG for details.\n"
-    fi
-  fi
-
-  # Step 3: Install status line config
+  # Step 2: Install status line config
   local settings_dir="$HOME/.claude"
   local settings_file="$settings_dir/settings.json"
-  # Status line queries DuckDB directly for agent info
-  # Walks up process tree to find a process with a TTY (needed because status line runs in subprocess)
-  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); dir=$(basename "$cwd"); hivemind='"'"''"'"'; task_info='"'"''"'"'; agent='"'"''"'"'; hivemind_dir='"'"''"'"'; d="$cwd"; while [ "$d" != "/" ]; do if [ -d "$d/.hivemind" ]; then hivemind_dir="$d/.hivemind"; break; fi; d=$(dirname "$d"); done; if [ -n "$hivemind_dir" ] && [ -f "$hivemind_dir/hive.db" ]; then pid=$$; tty=""; while [ -n "$pid" ] && [ "$pid" != "1" ]; do ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); if [ -n "$ptty" ] && [ "$ptty" != "??" ]; then tty="/dev/$ptty"; break; fi; pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); done; if [ -n "$tty" ]; then row=$(duckdb -json "$hivemind_dir/hive.db" "SELECT name, current_task, last_task FROM agents WHERE tty = '"'"'$tty'"'"' AND ended_at IS NULL LIMIT 1" 2>/dev/null | jq -r '"'"'.[0] // empty'"'"'); if [ -n "$row" ]; then agent=$(echo "$row" | jq -r '"'"'.name // empty'"'"'); task=$(echo "$row" | jq -r '"'"'.current_task // empty'"'"'); lastTask=$(echo "$row" | jq -r '"'"'.last_task // empty'"'"'); fi; fi; fi; if [ -n "$agent" ]; then hivemind=$(printf '"'"'\033[1;35m[%s]\033[0m '"'"' "$agent"); if [ -n "$task" ]; then task_info=$(printf '"'"'\n\033[0;33m%s\033[0m'"'"' "$task"); elif [ -n "$lastTask" ]; then task_info=$(printf '"'"'\n\033[0;90m%s\033[0m'"'"' "$lastTask"); elif [ -f "$hivemind_dir/version.txt" ]; then version=$(cat "$hivemind_dir/version.txt"); task_info=$(printf '"'"'\n\033[0;35mhivemind v%s\033[0m'"'"' "$version"); fi; fi; git_info='"'"''"'"'; if cd "$cwd" 2>/dev/null && git rev-parse --git-dir > /dev/null 2>&1; then branch=$(git --no-optional-locks branch --show-current 2>/dev/null || git --no-optional-locks rev-parse --short HEAD 2>/dev/null); if [ -n "$branch" ]; then if [ -n "$(git --no-optional-locks status --porcelain 2>/dev/null)" ]; then git_info=$(printf '"'"' \033[1;34mgit:(\033[0;31m%s\033[1;34m) \033[0;33m✗\033[0m'"'"' "$branch"); else git_info=$(printf '"'"'\033[1;34mgit:(\033[0;31m%s\033[1;34m)\033[0m'"'"' "$branch"); fi; fi; fi; printf '"'"'%s\033[1;32m➜\033[0m  \033[0;36m%s\033[0m%s%s'"'"' "$hivemind" "$dir" "$git_info" "$task_info"'
+  # Status line queries Milvus directly for agent info
+  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); dir=$(basename "$cwd"); hivemind='"'"''"'"'; task_info='"'"''"'"'; agent='"'"''"'"'; hivemind_dir='"'"''"'"'; d="$cwd"; while [ "$d" != "/" ]; do if [ -d "$d/.hivemind" ]; then hivemind_dir="$d/.hivemind"; break; fi; d=$(dirname "$d"); done; if [ -n "$hivemind_dir" ]; then pid=$$; tty=""; while [ -n "$pid" ] && [ "$pid" != "1" ]; do ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); if [ -n "$ptty" ] && [ "$ptty" != "??" ]; then tty="/dev/$ptty"; break; fi; pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); done; if [ -n "$tty" ]; then result=$(curl -sf -X POST "http://localhost:19531/v2/vectordb/entities/query" -H "Authorization: Bearer root:Milvus" -H "Content-Type: application/json" -d "{\"dbName\":\"default\",\"collectionName\":\"hivemind_agents\",\"filter\":\"tty == \\\"$tty\\\" and ended_at < 1\",\"outputFields\":[\"name\",\"current_task\",\"last_task\"],\"limit\":1}" 2>/dev/null); if [ -n "$result" ]; then agent=$(echo "$result" | jq -r '"'"'.data[0].name // empty'"'"' 2>/dev/null); task=$(echo "$result" | jq -r '"'"'.data[0].current_task // empty'"'"' 2>/dev/null); lastTask=$(echo "$result" | jq -r '"'"'.data[0].last_task // empty'"'"' 2>/dev/null); fi; fi; fi; if [ -n "$agent" ]; then hivemind=$(printf '"'"'\033[1;35m[%s]\033[0m '"'"' "$agent"); if [ -n "$task" ]; then task_info=$(printf '"'"'\n\033[0;33m%s\033[0m'"'"' "$task"); elif [ -n "$lastTask" ]; then task_info=$(printf '"'"'\n\033[0;90m%s\033[0m'"'"' "$lastTask"); elif [ -f "$hivemind_dir/version.txt" ]; then version=$(cat "$hivemind_dir/version.txt"); task_info=$(printf '"'"'\n\033[0;35mhivemind v%s\033[0m'"'"' "$version"); fi; fi; git_info='"'"''"'"'; if cd "$cwd" 2>/dev/null && git rev-parse --git-dir > /dev/null 2>&1; then branch=$(git --no-optional-locks branch --show-current 2>/dev/null || git --no-optional-locks rev-parse --short HEAD 2>/dev/null); if [ -n "$branch" ]; then if [ -n "$(git --no-optional-locks status --porcelain 2>/dev/null)" ]; then git_info=$(printf '"'"' \033[1;34mgit:(\033[0;31m%s\033[1;34m) \033[0;33m✗\033[0m'"'"' "$branch"); else git_info=$(printf '"'"'\033[1;34mgit:(\033[0;31m%s\033[1;34m)\033[0m'"'"' "$branch"); fi; fi; fi; printf '"'"'%s\033[1;32m➜\033[0m  \033[0;36m%s\033[0m%s%s'"'"' "$hivemind" "$dir" "$git_info" "$task_info"'
 
   mkdir -p "$settings_dir"
 
@@ -587,7 +586,7 @@ handle_tools_list() {
     {"name":"hive_changes","description":"View recent file changes made by all agents","inputSchema":{"type":"object","properties":{"count":{"type":"integer","description":"Number of changes to show (default 20)"}},"required":[]}},
     {"name":"hive_inbox","description":"View your message history. Returns recent messages you have received.","inputSchema":{"type":"object","properties":{"limit":{"type":"number","description":"Maximum messages to return (default: 10)"},"unread_only":{"type":"boolean","description":"Only show undelivered messages (default: false)"}},"required":[]}},
     {"name":"hive_help","description":"Show Hivemind command reference. Display the full output to the user as-is.","inputSchema":{"type":"object","properties":{},"required":[]}},
-    {"name":"hive_setup","description":"Set up Hivemind: installs DuckDB (if missing) and configures status line. Run this first when using Hivemind in a new project.","inputSchema":{"type":"object","properties":{},"required":[]}}
+    {"name":"hive_setup","description":"Set up Hivemind: checks Milvus and configures status line. Run this first when using Hivemind in a new project.","inputSchema":{"type":"object","properties":{},"required":[]}}
   ]}'
 }
 

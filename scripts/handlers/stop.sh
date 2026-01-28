@@ -36,19 +36,27 @@ if [ -z "$HIVEMIND_DIR" ]; then
 fi
 export HIVEMIND_DIR
 
-# Ensure database is initialized
-db_ensure_initialized
+# Check if Milvus is available
+if ! milvus_ready; then
+  exit 0
+fi
 
-# Find agent by session_id in database
-AGENT_NAME=$(db_query "SELECT name FROM agents WHERE session_id = $(db_quote "$SESSION_ID") LIMIT 1" | jq -r '.[0].name // empty')
+# Find agent by session_id in Milvus
+agent_json=$(get_agent_by_session "$SESSION_ID")
+AGENT_NAME=$(echo "$agent_json" | jq -r '.[0].name // empty')
 
 if [ -n "$AGENT_NAME" ]; then
   # Only clear if there's a task set
-  CURRENT_TASK=$(db_query "SELECT current_task FROM agents WHERE name = $(db_quote "$AGENT_NAME")" | jq -r '.[0].current_task // empty')
+  CURRENT_TASK=$(echo "$agent_json" | jq -r '.[0].current_task // empty')
 
   if [ -n "$CURRENT_TASK" ]; then
     # Move current_task to last_task, clear current_task
-    db_exec "UPDATE agents SET last_task = current_task, current_task = NULL WHERE name = $(db_quote "$AGENT_NAME")"
+    # Get other fields to preserve
+    tty=$(echo "$agent_json" | jq -r '.[0].tty // empty')
+    started_at=$(echo "$agent_json" | jq -r '.[0].started_at // 0')
+    ended_at=$(echo "$agent_json" | jq -r '.[0].ended_at // 0')
+
+    upsert_agent "$AGENT_NAME" "$SESSION_ID" "$tty" "$started_at" "$ended_at" "" "$CURRENT_TASK"
   fi
 fi
 

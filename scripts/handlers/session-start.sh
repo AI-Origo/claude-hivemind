@@ -3,16 +3,10 @@
 #
 # On SessionStart:
 # 1. Find first available phonetic codename
-# 2. Create agent record in database
+# 2. Create agent record in Milvus
 # 3. Output context about other active agents and assigned tasks
 
 set -uo pipefail
-
-# Check for DuckDB FIRST - before sourcing any libraries
-# If DuckDB is not installed, exit silently (user should run /hive setup)
-if ! command -v duckdb &> /dev/null; then
-    exit 0
-fi
 
 # Phonetic alphabet for agent naming
 AGENT_NAMES=(
@@ -51,9 +45,6 @@ if [ -z "$WORKING_DIR" ] || [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
-# Current timestamp
-NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
 # Coordination directory - search up for existing .hivemind, fall back to current dir
 HIVEMIND_DIR=$(find_hivemind_dir "$WORKING_DIR")
 if [ -z "$HIVEMIND_DIR" ]; then
@@ -62,8 +53,16 @@ if [ -z "$HIVEMIND_DIR" ]; then
 fi
 export HIVEMIND_DIR
 
-# Ensure database is initialized (creates schema and copies templates)
+# Copy templates (creates .hivemind directory if needed)
 db_full_init
+
+# Check if Milvus is available - if not, exit silently (user should run start-milvus.sh)
+if ! milvus_ready; then
+  exit 0
+fi
+
+# Current timestamp (Unix epoch)
+NOW=$(get_timestamp)
 
 # Write version file from plugin.json
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -95,25 +94,28 @@ fi
 ASSIGNED_NAME=""
 
 # Priority 1: Check if this session already has an agent assigned
-existing_agent=$(db_query "SELECT name FROM agents WHERE session_id = $(db_quote "$SESSION_ID") AND ended_at IS NULL LIMIT 1" | jq -r '.[0].name // empty')
+existing_agent=$(get_agent_by_session "$SESSION_ID" | jq -r '.[0].name // empty')
 if [[ -n "$existing_agent" ]]; then
   ASSIGNED_NAME="$existing_agent"
 fi
 
 # Priority 2: Check for TTY-based recovery (same terminal recovers same agent)
 if [[ -z "$ASSIGNED_NAME" && -n "$AGENT_TTY" ]]; then
-  tty_agent=$(db_query "SELECT name FROM agents WHERE tty = $(db_quote "$AGENT_TTY") LIMIT 1" | jq -r '.[0].name // empty')
+  tty_agent_json=$(milvus_query "agents" "tty == $(db_quote "$AGENT_TTY")" "*" 1)
+  tty_agent=$(echo "$tty_agent_json" | jq -r '.[0].name // empty')
   if [[ -n "$tty_agent" ]]; then
     ASSIGNED_NAME="$tty_agent"
     # Update agent with new session, clear ended_at, update started_at
-    db_exec "UPDATE agents SET session_id = $(db_quote "$SESSION_ID"), started_at = '$NOW', ended_at = NULL WHERE name = $(db_quote "$ASSIGNED_NAME")"
+    current_task=$(echo "$tty_agent_json" | jq -r '.[0].current_task // empty')
+    last_task=$(echo "$tty_agent_json" | jq -r '.[0].last_task // empty')
+    upsert_agent "$ASSIGNED_NAME" "$SESSION_ID" "$AGENT_TTY" "$NOW" 0 "$current_task" "$last_task"
   fi
 fi
 
 # Priority 3: Find first available codename
 if [[ -z "$ASSIGNED_NAME" ]]; then
   # Get list of active agent names (ended agents release their names)
-  existing_names=$(db_query "SELECT name FROM agents WHERE ended_at IS NULL" | jq -r '.[].name' 2>/dev/null || echo "")
+  existing_names=$(get_active_agents | jq -r '.[].name' 2>/dev/null || echo "")
 
   for name in "${AGENT_NAMES[@]}"; do
     if ! echo "$existing_names" | grep -q "^${name}$"; then
@@ -129,23 +131,24 @@ if [[ -z "$ASSIGNED_NAME" ]]; then
 fi
 
 # Check if agent exists in database
-agent_exists=$(db_query "SELECT 1 FROM agents WHERE name = $(db_quote "$ASSIGNED_NAME")" | jq -r '.[0] // empty')
+agent_exists=$(milvus_query "agents" "id == $(db_quote "$ASSIGNED_NAME")" "id" 1)
 
-if [[ -z "$agent_exists" ]]; then
+if [[ $(echo "$agent_exists" | jq 'length') -eq 0 ]]; then
   # Insert new agent
-  db_exec "INSERT INTO agents (name, session_id, tty, started_at) VALUES ($(db_quote "$ASSIGNED_NAME"), $(db_quote "$SESSION_ID"), $(db_quote "$AGENT_TTY"), '$NOW')"
+  upsert_agent "$ASSIGNED_NAME" "$SESSION_ID" "$AGENT_TTY" "$NOW" 0 "" ""
 else
   # Update existing agent (recovery case)
-  db_exec "UPDATE agents SET session_id = $(db_quote "$SESSION_ID"), tty = $(db_quote "$AGENT_TTY"), started_at = '$NOW', ended_at = NULL WHERE name = $(db_quote "$ASSIGNED_NAME")"
+  existing=$(milvus_query "agents" "id == $(db_quote "$ASSIGNED_NAME")" "*" 1)
+  current_task=$(echo "$existing" | jq -r '.[0].current_task // empty')
+  last_task=$(echo "$existing" | jq -r '.[0].last_task // empty')
+  upsert_agent "$ASSIGNED_NAME" "$SESSION_ID" "$AGENT_TTY" "$NOW" 0 "$current_task" "$last_task"
 fi
-
-# Status line now reads directly from DuckDB - no file-based mappings needed
 
 # Gather info about other active agents
 OTHER_AGENTS=""
 AGENT_COUNT=0
 
-other_agents_json=$(db_query "SELECT name, current_task FROM agents WHERE name != $(db_quote "$ASSIGNED_NAME") AND ended_at IS NULL")
+other_agents_json=$(milvus_query "agents" "ended_at < 1 and id != $(db_quote "$ASSIGNED_NAME")" "name,current_task" 100)
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   agent_name=$(echo "$line" | jq -r '.name // empty')
@@ -165,11 +168,12 @@ while IFS= read -r line; do
 done < <(echo "$other_agents_json" | jq -c '.[]' 2>/dev/null || echo "")
 
 # Check for tasks assigned to this agent
-assigned_tasks_json=$(db_query "SELECT id, title, state FROM tasks WHERE assignee = $(db_quote "$ASSIGNED_NAME") AND state NOT IN ('done') ORDER BY id")
+assigned_tasks_json=$(milvus_query "tasks" "assignee == $(db_quote "$ASSIGNED_NAME") and state != \"done\"" "seq_id,title,state" 100)
+assigned_tasks_json=$(echo "$assigned_tasks_json" | jq -c 'sort_by(.seq_id)')
 TASK_INFO=""
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
-  task_id=$(echo "$line" | jq -r '.id // empty')
+  task_id=$(echo "$line" | jq -r '.seq_id // empty')
   [[ -z "$task_id" ]] && continue
 
   task_title=$(echo "$line" | jq -r '.title // empty')
@@ -182,11 +186,12 @@ while IFS= read -r line; do
 done < <(echo "$assigned_tasks_json" | jq -c '.[]' 2>/dev/null || echo "")
 
 # Check for tasks in review awaiting approval
-review_tasks_json=$(db_query "SELECT id, title, assignee FROM tasks WHERE state = 'review' AND assignee != $(db_quote "$ASSIGNED_NAME") ORDER BY id")
+review_tasks_json=$(milvus_query "tasks" "state == \"review\" and assignee != $(db_quote "$ASSIGNED_NAME")" "seq_id,title,assignee" 100)
+review_tasks_json=$(echo "$review_tasks_json" | jq -c 'sort_by(.seq_id)')
 REVIEW_INFO=""
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
-  task_id=$(echo "$line" | jq -r '.id // empty')
+  task_id=$(echo "$line" | jq -r '.seq_id // empty')
   [[ -z "$task_id" ]] && continue
 
   task_title=$(echo "$line" | jq -r '.title // empty')

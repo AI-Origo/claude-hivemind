@@ -2,7 +2,7 @@
 # pre-tool.sh - PreToolUse handler for agent coordination
 #
 # Runs before EVERY tool execution:
-# 1. Message delivery - check database and deliver messages (silent if none)
+# 1. Message delivery - check Milvus and deliver messages (silent if none)
 #
 # Tool-specific handling:
 # - EnterPlanMode: Remind to set task as "Planning: <topic>"
@@ -52,7 +52,7 @@ get_current_tty() {
   echo "$tty"
 }
 
-# Look up agent name using TTY first, then session_id from database
+# Look up agent name using TTY first, then session_id
 lookup_agent_name() {
   local tty="$1"
   local session_id="$2"
@@ -60,12 +60,12 @@ lookup_agent_name() {
 
   # Try TTY first (most stable)
   if [[ -n "$tty" ]]; then
-    agent_name=$(db_query "SELECT name FROM agents WHERE tty = $(db_quote "$tty") LIMIT 1" | jq -r '.[0].name // empty')
+    agent_name=$(get_agent_by_tty "$tty" | jq -r '.[0].name // empty')
   fi
 
   # Fall back to session_id
   if [[ -z "$agent_name" && -n "$session_id" ]]; then
-    agent_name=$(db_query "SELECT name FROM agents WHERE session_id = $(db_quote "$session_id") LIMIT 1" | jq -r '.[0].name // empty')
+    agent_name=$(get_agent_by_session "$session_id" | jq -r '.[0].name // empty')
   fi
 
   echo "$agent_name"
@@ -106,29 +106,32 @@ if [ -z "$HIVEMIND_DIR" ]; then
 fi
 export HIVEMIND_DIR
 
-# Ensure database is initialized
-db_ensure_initialized
+# Check if Milvus is available
+if ! milvus_ready; then
+  exit 0
+fi
 
 # Get TTY for stable identity lookup
 AGENT_TTY=$(get_current_tty)
 
-# Look up agent name from database
+# Look up agent name
 AGENT_NAME=$(lookup_agent_name "$AGENT_TTY" "$SESSION_ID")
 
 MESSAGES_OUTPUT=""
 if [ -n "$AGENT_NAME" ]; then
-  # Query pending messages from database
-  messages_json=$(db_query "SELECT id, from_agent, body, priority, created_at FROM messages WHERE to_agent = $(db_quote "$AGENT_NAME") AND delivered_at IS NULL ORDER BY created_at")
+  # Query pending messages from Milvus
+  messages_json=$(get_pending_messages "$AGENT_NAME")
 
   # Process each message
-  message_ids=""
+  message_ids="[]"
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     msg_id=$(echo "$line" | jq -r '.id // empty')
     [[ -z "$msg_id" ]] && continue
 
     FROM=$(echo "$line" | jq -r '.from_agent // "unknown"')
-    TIMESTAMP=$(echo "$line" | jq -r '.created_at // ""')
+    ts_epoch=$(echo "$line" | jq -r '.created_at // 0')
+    TIMESTAMP=$(epoch_to_iso "$ts_epoch")
     CONTENT=$(echo "$line" | jq -r '.body // ""')
     PRIORITY=$(echo "$line" | jq -r '.priority // "normal"')
 
@@ -139,16 +142,12 @@ if [ -n "$AGENT_NAME" ]; then
     MESSAGES_OUTPUT="${MESSAGES_OUTPUT}${PRIORITY_PREFIX}[HIVE AGENT MESSAGE] From ${FROM} (${TIMESTAMP}): ${CONTENT}\n"
 
     # Collect message IDs for marking as delivered
-    if [[ -n "$message_ids" ]]; then
-      message_ids="${message_ids}, $(db_quote "$msg_id")"
-    else
-      message_ids="$(db_quote "$msg_id")"
-    fi
+    message_ids=$(echo "$message_ids" | jq --arg id "$msg_id" '. + [$id]')
   done < <(echo "$messages_json" | jq -c '.[]' 2>/dev/null || echo "")
 
   # Mark messages as delivered
-  if [[ -n "$message_ids" ]]; then
-    db_exec "UPDATE messages SET delivered_at = now() WHERE id IN ($message_ids)"
+  if [[ $(echo "$message_ids" | jq 'length') -gt 0 ]]; then
+    mark_messages_delivered "$message_ids"
   fi
 fi
 
@@ -199,12 +198,12 @@ if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
     COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND TASK TRACKING] Plan accepted. Agent ${AGENT_NAME}: Record this plan as your current task using hive_task so other agents can see what you are working on.\n\n"
   fi
 
-  # Build delegation guidance from database
+  # Build delegation guidance from Milvus
   DELEGATION_OUTPUT=""
   IDLE_AGENTS=""
   IDLE_COUNT=0
 
-  other_agents_json=$(db_query "SELECT name, current_task FROM agents WHERE name != $(db_quote "$AGENT_NAME") AND ended_at IS NULL")
+  other_agents_json=$(milvus_query "agents" "ended_at < 1 and id != $(db_quote "$AGENT_NAME")" "name,current_task" 100)
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     OTHER_NAME=$(echo "$line" | jq -r '.name // empty')
@@ -269,7 +268,7 @@ if [ -z "$FILE_PATH" ] || { [ "$TOOL_NAME" != "Write" ] && [ "$TOOL_NAME" != "Ed
 fi
 
 # ============================================================================
-# WRITE/EDIT FILE LOCKING (using database)
+# WRITE/EDIT FILE LOCKING (using Milvus)
 # ============================================================================
 
 # If no agent name, deliver messages and exit
@@ -286,17 +285,16 @@ REL_PATH="${FILE_PATH#$WORKING_DIR/}"
 
 WARNING=""
 
-# Check if file is locked by another agent in database
-lock_info=$(db_query "SELECT agent_name, locked_at FROM file_locks WHERE file_path = $(db_quote "$REL_PATH") LIMIT 1")
+# Check if file is locked by another agent in Milvus
+lock_info=$(get_file_lock "$REL_PATH")
 LOCK_OWNER=$(echo "$lock_info" | jq -r '.[0].agent_name // empty')
 
 if [ -n "$LOCK_OWNER" ] && [ "$LOCK_OWNER" != "$AGENT_NAME" ]; then
   WARNING="[HIVEMIND WARNING] File '$REL_PATH' is being edited by agent '$LOCK_OWNER'. Consider coordinating to avoid conflicts."
 fi
 
-# Create/update lock for this agent in database
-# Use INSERT OR REPLACE (upsert) pattern
-db_exec "INSERT OR REPLACE INTO file_locks (file_path, agent_name, locked_at) VALUES ($(db_quote "$REL_PATH"), $(db_quote "$AGENT_NAME"), now())"
+# Create/update lock for this agent in Milvus
+acquire_lock "$REL_PATH" "$AGENT_NAME"
 
 # Combine message delivery with any file lock warning
 FINAL_OUTPUT=""

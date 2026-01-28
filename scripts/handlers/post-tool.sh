@@ -2,8 +2,8 @@
 # post-tool.sh - Track changes after Write/Edit
 #
 # On PostToolUse (Write/Edit):
-# 1. Insert entry into changelog table
-# 2. Release file lock from database
+# 1. Insert entry into changelog in Milvus
+# 2. Release file lock from Milvus
 
 set -euo pipefail
 
@@ -47,7 +47,7 @@ get_current_tty() {
   echo "$tty"
 }
 
-# Look up agent name using TTY first, then session_id from database
+# Look up agent name using TTY first, then session_id
 lookup_agent_name() {
   local tty="$1"
   local session_id="$2"
@@ -55,12 +55,12 @@ lookup_agent_name() {
 
   # Try TTY first (most stable)
   if [[ -n "$tty" ]]; then
-    agent_name=$(db_query "SELECT name FROM agents WHERE tty = $(db_quote "$tty") LIMIT 1" | jq -r '.[0].name // empty')
+    agent_name=$(get_agent_by_tty "$tty" | jq -r '.[0].name // empty')
   fi
 
   # Fall back to session_id
   if [[ -z "$agent_name" && -n "$session_id" ]]; then
-    agent_name=$(db_query "SELECT name FROM agents WHERE session_id = $(db_quote "$session_id") LIMIT 1" | jq -r '.[0].name // empty')
+    agent_name=$(get_agent_by_session "$session_id" | jq -r '.[0].name // empty')
   fi
 
   echo "$agent_name"
@@ -92,13 +92,15 @@ if [ -z "$HIVEMIND_DIR" ]; then
 fi
 export HIVEMIND_DIR
 
-# Ensure database is initialized
-db_ensure_initialized
+# Check if Milvus is available
+if ! milvus_ready; then
+  exit 0
+fi
 
 # Get TTY for stable identity lookup
 AGENT_TTY=$(get_current_tty)
 
-# Look up agent name from database
+# Look up agent name
 AGENT_NAME=$(lookup_agent_name "$AGENT_TTY" "$SESSION_ID")
 if [ -z "$AGENT_NAME" ]; then
   exit 0
@@ -122,14 +124,11 @@ elif echo "$TOOL_RESULT" | grep -qi "updated\|modified\|edited"; then
   SUMMARY="Modified file"
 fi
 
-# Get next changelog ID
-CHANGELOG_ID=$(db_next_id "changelog_id_seq")
+# Insert changelog entry into Milvus
+insert_changelog "$AGENT_NAME" "$ACTION" "$REL_PATH" "$SUMMARY"
 
-# Insert changelog entry into database
-db_exec "INSERT INTO changelog (id, agent, action, file_path, summary) VALUES ($CHANGELOG_ID, $(db_quote "$AGENT_NAME"), $(db_quote "$ACTION"), $(db_quote "$REL_PATH"), $(db_quote "$SUMMARY"))"
-
-# Release file lock from database (only if owned by this agent)
-db_exec "DELETE FROM file_locks WHERE file_path = $(db_quote "$REL_PATH") AND agent_name = $(db_quote "$AGENT_NAME")"
+# Release file lock from Milvus (only if owned by this agent)
+release_lock "$REL_PATH" "$AGENT_NAME"
 
 # No output needed for PostToolUse
 exit 0

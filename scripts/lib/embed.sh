@@ -106,20 +106,21 @@ embeddings_available() {
     return 0
 }
 
-# Format embedding array for DuckDB insertion
-# DuckDB expects array format: [1.0, 2.0, 3.0, ...]
+# Format embedding array for Milvus insertion
+# Milvus expects array format: [1.0, 2.0, 3.0, ...]
 # Args:
 #   $1 - JSON embedding array from OpenAI
-# Returns: DuckDB-compatible array string, or "NULL" if input is null
+# Returns: Milvus-compatible array string, or "null" if input is null
 format_embedding_for_db() {
     local embedding="$1"
 
     if [[ "$embedding" == "null" ]] || [[ -z "$embedding" ]]; then
-        echo "NULL"
-        return 0
+        # Return null - caller should generate zero vector if needed
+        echo "null"
+        return 1
     fi
 
-    # OpenAI returns JSON array which is already DuckDB compatible
+    # OpenAI returns JSON array which is already Milvus compatible
     echo "$embedding"
     return 0
 }
