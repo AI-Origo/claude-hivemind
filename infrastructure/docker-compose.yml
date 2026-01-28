@@ -1,0 +1,94 @@
+version: '3.8'
+
+# Hivemind Milvus Setup
+# Uses different ports than euskb to allow co-existence:
+# - 19531: Milvus gRPC/HTTP API (euskb uses 19530)
+# - 9092: Milvus metrics/health (euskb uses 9091)
+# - 8083: Attu UI (optional, euskb uses 8082)
+
+services:
+  etcd:
+    container_name: hivemind-etcd
+    image: quay.io/coreos/etcd:v3.5.5
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - hivemind-etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - hivemind-network
+
+  minio:
+    container_name: hivemind-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - hivemind-minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - hivemind-network
+
+  milvus:
+    container_name: hivemind-milvus
+    image: milvusdb/milvus:v2.5.4
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MILVUS_LOG_LEVEL: info
+    volumes:
+      - hivemind-milvus-data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19531:19530"  # gRPC/HTTP API (different from euskb's 19530)
+      - "9092:9091"    # metrics/health (different from euskb's 9091)
+    depends_on:
+      - etcd
+      - minio
+    networks:
+      - hivemind-network
+
+  attu:
+    container_name: hivemind-attu
+    image: zilliz/attu:v2.4.12
+    environment:
+      MILVUS_URL: milvus:19530
+    ports:
+      - "8083:3000"  # Attu UI (different from euskb's 8082)
+    depends_on:
+      - milvus
+    networks:
+      - hivemind-network
+    profiles:
+      - ui  # Only start with --profile ui
+
+networks:
+  hivemind-network:
+    driver: bridge
+
+volumes:
+  hivemind-etcd-data:
+  hivemind-minio-data:
+  hivemind-milvus-data:
