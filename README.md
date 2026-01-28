@@ -10,27 +10,19 @@ idle terminals as Claude Code does not offer a way to be woken up by an external
 ## Requirements
 
 - **Claude Code** CLI
+- **Docker and Docker Compose** for Milvus database
 - **jq** for JSON processing
-- **DuckDB** for database storage
 - **macOS + iTerm2** (optional) - Required for agent wake-up feature. You need to explicitly keep agents "awake" otherwise.
 
 ## Prerequisites
 
-### DuckDB Installation
+### Docker Installation
 
-DuckDB is required for hivemind's data storage. The easiest way to install it is via `/hive setup` after loading the plugin.
+Docker is required to run Milvus, the vector database used for hivemind's data storage.
 
-Or install manually:
-
-```bash
-# macOS
-brew install duckdb
-
-# Linux (Debian/Ubuntu)
-wget https://github.com/duckdb/duckdb/releases/download/v1.1.0/duckdb_cli-linux-amd64.zip
-unzip duckdb_cli-linux-amd64.zip
-sudo mv duckdb /usr/local/bin/
-```
+1. Install Docker Desktop from https://www.docker.com/products/docker-desktop/
+2. Ensure Docker Compose is available (included with Docker Desktop)
+3. Start Docker Desktop before using hivemind
 
 ### OpenAI API Key (Optional - for Semantic Search)
 
@@ -67,26 +59,31 @@ Alternatively, the first time the wake feature runs, macOS will prompt you to al
 claude --plugin-dir /path/to/hivemind
 ```
 
-### 3. Run Setup
+### 3. Start Milvus
+
+```bash
+./path/to/hivemind/scripts/start-milvus.sh
+```
+
+This starts the Milvus containers via Docker Compose. The first run may take a minute to download images.
+
+### 4. Run Setup
 
 ```
 /hive setup
 ```
 
-This takes a minute or two. Here's what happens:
-1. **Installs DuckDB** via Homebrew/apt (if not already installed)
-2. **Installs the VSS extension** for vector similarity search (semantic search)
-3. **Configures the status line** to show your agent name and current task
+This configures the status line to show your agent name and current task. Collections are auto-initialized on first use.
 
 Restart Claude Code after setup completes.
 
-### 4. Run your first command
+### 5. Run your first command
 
 ```
 /hive help
 ```
 
-### 5. Add to `.gitignore`
+### 6. Add to `.gitignore`
 
 ```
 .hivemind/
@@ -513,29 +510,40 @@ Hivemind is a Claude Code plugin with three components:
 
 ### Database Storage
 
-All data is stored in DuckDB at `.hivemind/hive.db`:
+All data is stored in Milvus, a vector database running via Docker:
 
-```sql
--- Core coordination
-agents          -- Agent registration and status
-file_locks      -- Advisory file locks
-messages        -- Inter-agent messages
-changelog       -- File change history
+**Architecture:**
+- Milvus v2.5.4 (standalone mode)
+- etcd for configuration management
+- MinIO for object storage
+- All components run as Docker containers
 
--- Task management
-tasks           -- Task queue with state machine
+**Ports:**
+- `19531` - Milvus REST API
+- `9092` - Health check endpoint
+- `8083` - Optional Attu UI (if enabled)
 
--- Knowledge & memory
-knowledge       -- Knowledge base entries
-memory          -- Key-value project memory
-decisions       -- Decision log
+**Collections:**
+```
+-- Core coordination (placeholder vectors)
+hivemind_agents         -- Agent registration and status
+hivemind_file_locks     -- Advisory file locks
+hivemind_messages       -- Inter-agent messages
+hivemind_changelog      -- File change history
+hivemind_metrics        -- Event metrics for dashboard
+hivemind_context_injections -- Context budget tracking
 
--- Observability
-metrics         -- Event metrics for dashboard
-context_injections -- Context budget tracking
+-- Vector-enabled collections (3072 dimensions)
+hivemind_tasks          -- Task queue with semantic search
+hivemind_knowledge      -- Knowledge base entries
+hivemind_memory         -- Key-value project memory
+hivemind_decisions      -- Decision log
+
+-- Sequences
+hivemind_sequences      -- Auto-increment IDs
 ```
 
-All tables with text content (tasks, knowledge, memory, decisions) have optional embedding columns for semantic search using OpenAI's `text-embedding-3-large` (3072 dimensions).
+All vector-enabled collections use OpenAI's `text-embedding-3-large` (3072 dimensions) for semantic search. Placeholder collections use 8-dimensional vectors.
 
 ### Agent Lifecycle
 
@@ -599,31 +607,31 @@ Tasks can have dependencies (`depends_on` array). A task is blocked if any of it
 
 ```
 .hivemind/
-├── hive.db           # DuckDB database (all data)
-├── hive.db.wal       # DuckDB write-ahead log
 ├── .env              # API keys (gitignored)
 ├── .env.example      # Example env file
-├── .gitignore        # Ignores .env, *.db, *.db.wal
-├── version.txt       # Plugin version
-└── backup/           # Backup of migrated file-based data
+├── .gitignore        # Ignores .env
+└── version.txt       # Plugin version
 ```
 
-## Migration from File-based Storage
-
-If you have an existing hivemind installation with file-based storage, run the migration script:
-
-```bash
-./scripts/migrate-to-db.sh
-```
-
-This will:
-1. Migrate agents from `.hivemind/agents/*.json`
-2. Migrate locks from `.hivemind/locks/*.lock`
-3. Migrate messages from `.hivemind/messages/inbox-*/*.json`
-4. Migrate changelog from `.hivemind/changelog.jsonl`
-5. Back up original files to `.hivemind/backup/`
+Data is stored in Docker volumes managed by Milvus, not in the `.hivemind/` directory.
 
 ## Troubleshooting
+
+### Milvus not starting
+
+Check that Docker is running and ports are available:
+
+```bash
+# Check Milvus health
+curl http://localhost:9092/healthz
+
+# View Milvus logs
+docker logs hivemind-milvus
+
+# View all container logs
+docker logs hivemind-etcd
+docker logs hivemind-minio
+```
 
 ### Agent wake-up not working
 
@@ -631,8 +639,7 @@ The wake-up feature requires macOS + iTerm2 with automation permissions:
 
 1. Ensure you're using iTerm2 (not Terminal.app or other terminals)
 2. Check that iTerm2 has automation permissions in **System Settings** → **Privacy & Security** → **Automation**
-3. Verify the agent has a TTY registered: `duckdb .hivemind/hive.db "SELECT name, tty FROM agents"`
-4. Check the debug log: `tail /tmp/hivemind-mcp-debug.log`
+3. Check the debug log: `tail /tmp/hivemind-mcp-debug.log`
 
 If permissions are missing, you can trigger the macOS prompt by running:
 ```bash
@@ -643,28 +650,17 @@ osascript scripts/utils/send-keystroke.scpt /dev/ttys000 "test"
 
 Agents are automatically reclaimed when a new session starts in the same terminal (TTY-based recovery). However, if a terminal window was closed without proper cleanup, stale agents may remain.
 
-To clean up manually:
+To clean up, stop Milvus with volume removal:
 ```bash
-duckdb .hivemind/hive.db "DELETE FROM agents WHERE ended_at IS NOT NULL"
-```
-
-Or reset completely:
-```bash
-rm .hivemind/hive.db .hivemind/hive.db.wal
+./scripts/stop-milvus.sh --remove-volumes
+./scripts/start-milvus.sh
 ```
 
 ### Messages not appearing
 
 Messages are delivered automatically on the next prompt submission. Check:
-1. Message exists: `duckdb .hivemind/hive.db "SELECT * FROM messages WHERE to_agent = 'your-agent' AND delivered_at IS NULL"`
-2. The `UserPromptSubmit` hook is configured
-
-### Locks stuck
-
-File locks are advisory and cleaned up automatically on session end. To manually clear:
-```bash
-duckdb .hivemind/hive.db "DELETE FROM file_locks"
-```
+1. The `UserPromptSubmit` hook is configured
+2. Milvus is running: `curl http://localhost:9092/healthz`
 
 ### Debug logs
 
@@ -675,19 +671,34 @@ Check the debug logs for troubleshooting:
 
 ### Database queries
 
-Inspect the database directly:
+Query Milvus directly via REST API:
+
 ```bash
 # List all agents
-duckdb .hivemind/hive.db "SELECT * FROM agents"
+curl -X POST http://localhost:19531/v2/vectordb/entities/query \
+  -H "Authorization: Bearer root:Milvus" \
+  -H "Content-Type: application/json" \
+  -d '{"dbName":"default","collectionName":"hivemind_agents","filter":"","outputFields":["*"],"limit":100}'
 
 # List pending tasks
-duckdb .hivemind/hive.db "SELECT * FROM tasks WHERE state = 'pending'"
+curl -X POST http://localhost:19531/v2/vectordb/entities/query \
+  -H "Authorization: Bearer root:Milvus" \
+  -H "Content-Type: application/json" \
+  -d '{"dbName":"default","collectionName":"hivemind_tasks","filter":"state == \"pending\"","outputFields":["*"],"limit":100}'
 
-# View recent changes
-duckdb .hivemind/hive.db "SELECT * FROM changelog ORDER BY timestamp DESC LIMIT 10"
+# View collection info
+curl -X POST http://localhost:19531/v2/vectordb/collections/describe \
+  -H "Authorization: Bearer root:Milvus" \
+  -H "Content-Type: application/json" \
+  -d '{"dbName":"default","collectionName":"hivemind_agents"}'
+```
 
-# Search knowledge (text-based)
-duckdb .hivemind/hive.db "SELECT * FROM knowledge WHERE content ILIKE '%auth%'"
+### Data cleanup
+
+To completely reset all data:
+```bash
+./scripts/stop-milvus.sh --remove-volumes
+./scripts/start-milvus.sh
 ```
 
 ## Development

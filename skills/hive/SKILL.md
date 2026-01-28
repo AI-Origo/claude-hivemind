@@ -9,9 +9,10 @@ All Hivemind commands are available as MCP tools. When the user runs `/hive <com
 
 ## First-Time Setup
 
-Run `/hive setup` to install dependencies and configure your environment:
-- Installs DuckDB (required for advanced features)
+Run `/hive setup` to configure your environment:
 - Configures status line to show agent name and current task
+
+Note: Milvus must be running first via `./scripts/start-milvus.sh`
 
 ## Command Mapping
 
@@ -46,7 +47,7 @@ The MCP tools handle all coordination logic.
 ```
 /hive setup
 ```
--> Call `hive_setup` (installs DuckDB and status line config)
+-> Call `hive_setup` (configures status line)
 
 ```
 /hive
