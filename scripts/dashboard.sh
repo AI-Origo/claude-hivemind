@@ -47,10 +47,10 @@ if [ -z "$HIVEMIND_DIR" ]; then
 fi
 export HIVEMIND_DIR
 
-# Ensure database exists
-if [ ! -f "$HIVEMIND_DIR/hive.db" ]; then
-  echo "Error: Database not found at $HIVEMIND_DIR/hive.db"
-  echo "Run hivemind init first."
+# Check Milvus is available
+if ! milvus_ready; then
+  echo "Error: Milvus not available"
+  echo "Run ./scripts/start-milvus.sh first."
   exit 1
 fi
 
@@ -103,15 +103,33 @@ render_dashboard() {
   echo -e "${V_LINE}${RESET}"
 
   # ===== AGENTS SECTION =====
-  local active_count=$(db_query "SELECT COUNT(*) as c FROM agents WHERE ended_at IS NULL AND current_task IS NOT NULL" | jq -r '.[0].c // 0')
-  local idle_count=$(db_query "SELECT COUNT(*) as c FROM agents WHERE ended_at IS NULL AND current_task IS NULL" | jq -r '.[0].c // 0')
-  local offline_count=$(db_query "SELECT COUNT(*) as c FROM agents WHERE ended_at IS NOT NULL" | jq -r '.[0].c // 0')
+  # Count active and idle agents (active = has current_task, idle = no current_task)
+  local all_agents=$(get_active_agents)
+  local active_count=0
+  local idle_count=0
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local task=$(echo "$line" | jq -r '.current_task // empty')
+    if [[ -n "$task" ]]; then
+      ((active_count++))
+    else
+      ((idle_count++))
+    fi
+  done < <(echo "$all_agents" | jq -c '.[]' 2>/dev/null || echo "")
+
+  # Count offline agents (ended_at != 0)
+  local offline_agents=$(milvus_query "agents" "ended_at > 0" "id" 100)
+  local offline_count=$(echo "$offline_agents" | jq 'length')
 
   echo -e "${V_LINE} ${BOLD}AGENTS${RESET}          active: ${GREEN}$active_count${RESET}  idle: ${YELLOW}$idle_count${RESET}  offline: ${DIM}$offline_count${RESET}"
   echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))"
 
-  # List agents
-  local agents=$(db_query "SELECT name, current_task, last_task, ended_at FROM agents ORDER BY ended_at NULLS FIRST, name")
+  # List agents (active first, then offline)
+  local agents=$(milvus_query "agents" "started_at > 0" "name,current_task,last_task,ended_at" 100)
+  # Sort by ended_at (nulls first means active agents first)
+  agents=$(echo "$agents" | jq -c 'sort_by(.ended_at) | .[]' 2>/dev/null || echo "")
+
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     local name=$(echo "$line" | jq -r '.name // empty')
@@ -119,13 +137,13 @@ render_dashboard() {
 
     local task=$(echo "$line" | jq -r '.current_task // empty')
     local last_task=$(echo "$line" | jq -r '.last_task // empty')
-    local ended_at=$(echo "$line" | jq -r '.ended_at // empty')
+    local ended_at=$(echo "$line" | jq -r '.ended_at // 0')
 
     local status_color="$GREEN"
     local status="working"
     local display_task="$task"
 
-    if [[ -n "$ended_at" ]]; then
+    if [[ "$ended_at" != "0" ]]; then
       status_color="$DIM"
       status="offline"
       display_task="$last_task"
@@ -142,23 +160,26 @@ render_dashboard() {
     fi
 
     printf "${V_LINE}  ${status_color}%-8s${RESET} [${status_color}%s${RESET}] %s\n" "$name" "$status" "$display_task"
-  done < <(echo "$agents" | jq -c '.[]' 2>/dev/null || echo "")
+  done <<< "$agents"
 
   echo -e "${V_LINE}"
 
   # ===== TASKS SECTION =====
-  local pending=$(db_query "SELECT COUNT(*) as c FROM tasks WHERE state = 'pending'" | jq -r '.[0].c // 0')
-  local in_progress=$(db_query "SELECT COUNT(*) as c FROM tasks WHERE state IN ('claimed', 'in_progress')" | jq -r '.[0].c // 0')
-  local review=$(db_query "SELECT COUNT(*) as c FROM tasks WHERE state = 'review'" | jq -r '.[0].c // 0')
+  local pending=$(milvus_query "tasks" "state == \"pending\"" "id" 100 | jq 'length')
+  local in_progress_json=$(milvus_query "tasks" "state == \"claimed\" or state == \"in_progress\"" "id" 100)
+  local in_progress=$(echo "$in_progress_json" | jq 'length')
+  local review=$(milvus_query "tasks" "state == \"review\"" "id" 100 | jq 'length')
 
   echo -e "${V_LINE} ${BOLD}TASKS${RESET}      pending: ${CYAN}$pending${RESET}  active: ${GREEN}$in_progress${RESET}  review: ${PURPLE}$review${RESET}"
   echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))"
 
   # List recent tasks (not done)
-  local tasks=$(db_query "SELECT id, title, state, assignee FROM tasks WHERE state != 'done' ORDER BY id LIMIT 5")
+  local tasks=$(milvus_query "tasks" "state != \"done\"" "seq_id,title,state,assignee" 100)
+  tasks=$(echo "$tasks" | jq -c 'sort_by(.seq_id) | .[:5]')
+
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    local id=$(echo "$line" | jq -r '.id // empty')
+    local id=$(echo "$line" | jq -r '.seq_id // empty')
     [[ -z "$id" ]] && continue
 
     local title=$(echo "$line" | jq -r '.title // empty')
@@ -184,11 +205,8 @@ render_dashboard() {
     printf "${V_LINE}  #%-3d [${state_color}%-11s${RESET}] %s%s\n" "$id" "$state" "$title" "$assignee_str"
   done < <(echo "$tasks" | jq -c '.[]' 2>/dev/null || echo "")
 
-  # Check for blocked tasks
-  local blocked=$(db_query "SELECT COUNT(*) as c FROM tasks t WHERE t.state = 'pending' AND EXISTS (SELECT 1 FROM unnest(t.depends_on) AS dep_id JOIN tasks d ON d.id = dep_id WHERE d.state != 'done')" | jq -r '.[0].c // 0')
-  if [[ "$blocked" -gt 0 ]]; then
-    echo -e "${V_LINE}  ${DIM}($blocked task(s) blocked by dependencies)${RESET}"
-  fi
+  # Note: Blocked task detection would require parsing depends_on JSON array
+  # Skipping for now as Milvus doesn't have good support for array contains
 
   echo -e "${V_LINE}"
 
@@ -196,7 +214,18 @@ render_dashboard() {
   echo -e "${V_LINE} ${BOLD}HOTSPOTS${RESET} (files with most edits today)"
   echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))"
 
-  local hotspots=$(db_query "SELECT file_path, COUNT(*) as edit_count FROM changelog WHERE timestamp > now() - INTERVAL '24 hours' GROUP BY file_path ORDER BY edit_count DESC LIMIT 3")
+  # Get changelog entries from last 24 hours and aggregate with jq
+  local cutoff=$(($(get_timestamp) - 86400))
+  local changelog=$(milvus_query "changelog" "timestamp >= $cutoff" "file_path" 1000)
+
+  # Aggregate by file_path using jq
+  local hotspots=$(echo "$changelog" | jq -c '
+    group_by(.file_path) |
+    map({file_path: .[0].file_path, edit_count: length}) |
+    sort_by(-.edit_count) |
+    .[:3]
+  ')
+
   local max_edits=$(echo "$hotspots" | jq -r '.[0].edit_count // 10')
   [[ "$max_edits" -lt 1 ]] && max_edits=1
 
@@ -233,18 +262,17 @@ render_dashboard() {
   echo -e "${V_LINE} ${BOLD}METRICS${RESET} (24h)"
   echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))"
 
-  local completed=$(db_query "SELECT COUNT(*) as c FROM metrics WHERE event_type = 'task_completed' AND timestamp > now() - INTERVAL '24 hours'" | jq -r '.[0].c // 0')
-  local approved=$(db_query "SELECT COUNT(*) as c FROM metrics WHERE event_type = 'review_approved' AND timestamp > now() - INTERVAL '24 hours'" | jq -r '.[0].c // 0')
-  local rejected=$(db_query "SELECT COUNT(*) as c FROM metrics WHERE event_type = 'review_rejected' AND timestamp > now() - INTERVAL '24 hours'" | jq -r '.[0].c // 0')
+  local completed=$(get_metrics_since "$cutoff" "task_completed" | jq 'length')
+  local approved=$(get_metrics_since "$cutoff" "review_approved" | jq 'length')
+  local rejected=$(get_metrics_since "$cutoff" "review_rejected" | jq 'length')
 
-  # Get most active file
-  local hottest=$(db_query "SELECT file_path, COUNT(*) as c FROM changelog WHERE timestamp > now() - INTERVAL '24 hours' GROUP BY file_path ORDER BY c DESC LIMIT 1")
-  local hottest_file=$(echo "$hottest" | jq -r '.[0].file_path // "none"')
-  local hottest_count=$(echo "$hottest" | jq -r '.[0].c // 0')
+  # Get most active file from hotspots
+  local hottest_file=$(echo "$hotspots" | jq -r '.[0].file_path // "none"')
+  local hottest_count=$(echo "$hotspots" | jq -r '.[0].edit_count // 0')
 
   echo -e "${V_LINE}  Tasks completed: ${GREEN}$completed${RESET}"
   echo -e "${V_LINE}  Reviews: ${GREEN}$approved${RESET} approved, ${RED}$rejected${RESET} rejected"
-  if [[ "$hottest_file" != "none" ]]; then
+  if [[ "$hottest_file" != "none" && "$hottest_file" != "null" ]]; then
     echo -e "${V_LINE}  Hottest file: ${YELLOW}$hottest_file${RESET} ($hottest_count edits)"
   fi
 

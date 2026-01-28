@@ -1,3 +1,6 @@
 .env
+logs/
+# Legacy DuckDB files (can be deleted after migration)
 *.db
 *.db.wal
+*.db.bak
