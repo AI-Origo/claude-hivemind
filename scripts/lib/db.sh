@@ -42,7 +42,7 @@ get_collection_prefix() {
     fi
 }
 
-# Generic POST request to Milvus
+# Generic POST request to Milvus with retry for rate limiting
 # Args:
 #   $1 - endpoint (e.g., /v2/vectordb/entities/query)
 #   $2 - JSON body
@@ -53,28 +53,48 @@ milvus_post() {
     local db_log
     db_log=$(get_db_log_path)
 
-    local response
-    response=$(curl -sf -X POST "${MILVUS_URL}${endpoint}" \
-        -H "Authorization: Bearer ${MILVUS_AUTH}" \
-        -H "Content-Type: application/json" \
-        -d "$data" 2>>"$db_log")
+    local max_retries=3
+    local retry_delay=0.2  # Start with 200ms
+    local attempt=0
 
-    if [[ $? -ne 0 ]]; then
-        echo '{"code":1,"message":"curl failed"}' >&2
-        return 1
-    fi
+    while [[ $attempt -lt $max_retries ]]; do
+        local response
+        response=$(curl -sf -X POST "${MILVUS_URL}${endpoint}" \
+            -H "Authorization: Bearer ${MILVUS_AUTH}" \
+            -H "Content-Type: application/json" \
+            -d "$data" 2>>"$db_log")
 
-    # Check for Milvus error response
-    local code
-    code=$(echo "$response" | jq -r '.code // 0' 2>/dev/null)
-    if [[ "$code" != "0" ]]; then
-        echo "$response" >> "$db_log"
+        if [[ $? -ne 0 ]]; then
+            echo '{"code":1,"message":"curl failed"}' >&2
+            return 1
+        fi
+
+        # Check for Milvus error response
+        local code
+        code=$(echo "$response" | jq -r '.code // 0' 2>/dev/null)
+
+        # Rate limit error (code 1807) - retry with backoff
+        if [[ "$code" == "1807" ]]; then
+            ((attempt++))
+            if [[ $attempt -lt $max_retries ]]; then
+                sleep "$retry_delay"
+                retry_delay=$(echo "$retry_delay * 2" | bc)  # Exponential backoff
+                continue
+            fi
+        fi
+
+        if [[ "$code" != "0" ]]; then
+            echo "$response" >> "$db_log"
+            echo "$response"
+            return 1
+        fi
+
         echo "$response"
-        return 1
-    fi
+        return 0
+    done
 
-    echo "$response"
-    return 0
+    echo '{"code":1807,"message":"rate limit exceeded after retries"}' >&2
+    return 1
 }
 
 # Health check
@@ -155,10 +175,12 @@ milvus_flush() {
 # Args:
 #   $1 - collection name (without prefix)
 #   $2 - JSON array of entities to insert
+#   $3 - (optional) "no_flush" to skip flush for eventual consistency
 # Returns: 0 on success, 1 on error
 milvus_insert() {
     local collection="$(get_collection_prefix)_$1"
     local data="$2"
+    local skip_flush="${3:-}"
 
     local body
     body=$(jq -n \
@@ -171,8 +193,8 @@ milvus_insert() {
     result=$(milvus_post "/v2/vectordb/entities/insert" "$body")
     local rc=$?
 
-    # Flush to ensure write is visible to other processes
-    if [[ $rc -eq 0 ]]; then
+    # Flush to ensure write is visible to other processes (unless skipped)
+    if [[ $rc -eq 0 && "$skip_flush" != "no_flush" ]]; then
         milvus_flush "$1"
     fi
 
@@ -715,7 +737,8 @@ insert_changelog() {
         --argjson embedding "$PLACEHOLDER_VECTOR" \
         '[{id:$id,seq_id:$seq_id,timestamp:$timestamp,agent:$agent,action:$action,file_path:$file_path,summary:$summary,embedding:$embedding}]')
 
-    milvus_insert "changelog" "$data"
+    # Skip flush for changelog - eventual consistency is acceptable
+    milvus_insert "changelog" "$data" "no_flush"
 }
 
 # Get recent changelog entries
@@ -927,7 +950,8 @@ insert_metric() {
         --argjson embedding "$PLACEHOLDER_VECTOR" \
         '[{id:$id,seq_id:$seq_id,event_type:$event_type,task_id:$task_id,agent:$agent,timestamp:$timestamp,duration_minutes:$duration_minutes,metadata:$metadata,embedding:$embedding}]')
 
-    milvus_insert "metrics" "$data"
+    # Skip flush for metrics - eventual consistency is acceptable
+    milvus_insert "metrics" "$data" "no_flush"
 }
 
 # Get metrics in time window
