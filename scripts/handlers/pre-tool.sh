@@ -117,6 +117,36 @@ AGENT_TTY=$(get_current_tty)
 # Look up agent name
 AGENT_NAME=$(lookup_agent_name "$AGENT_TTY" "$SESSION_ID")
 
+# ============================================================================
+# AWAITING_TASK ENFORCEMENT
+# If agent has awaiting_task flag set and is not calling hive_task, deny the tool
+# ============================================================================
+if [[ -n "$AGENT_NAME" && "$TOOL_NAME" != *"hive_task"* ]]; then
+  awaiting_task=$(get_agent_flag "$AGENT_NAME" "awaiting_task")
+  if [[ "$awaiting_task" == "1" ]]; then
+    # Check if task was already set
+    agent_json=$(get_agent_by_session "$SESSION_ID")
+    CURRENT_TASK=$(echo "$agent_json" | jq -r '.[0].current_task // empty')
+
+    if [[ -z "$CURRENT_TASK" ]]; then
+      # Deny the tool call and force task recording
+      cat <<EOF
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "[HIVEMIND ENFORCEMENT] Agent $AGENT_NAME: You MUST call hive_task first to record what you're working on. Describe the task from your accepted plan."
+  }
+}
+EOF
+      exit 0
+    else
+      # Task was set, clear the flag
+      clear_agent_flag "$AGENT_NAME" "awaiting_task"
+    fi
+  fi
+fi
+
 MESSAGES_OUTPUT=""
 if [ -n "$AGENT_NAME" ]; then
   # Query pending messages from Milvus

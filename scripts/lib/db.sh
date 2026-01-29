@@ -819,6 +819,84 @@ update_task() {
 }
 
 # ============================================================================
+# AGENT FLAG HELPERS
+# ============================================================================
+
+# Set a flag on an agent (stored in agent's flags field as JSON)
+set_agent_flag() {
+  local agent_name="$1"
+  local flag="$2"
+  local value="$3"
+
+  # Get current agent data
+  local agent_json
+  agent_json=$(milvus_query "agents" "id == $(db_quote "$agent_name")" "*" 1)
+  if [[ $(echo "$agent_json" | jq 'length') -eq 0 ]]; then
+    return 1
+  fi
+
+  # Get or initialize flags field
+  local current_flags
+  current_flags=$(echo "$agent_json" | jq -r '.[0].flags // "{}"')
+  [[ "$current_flags" == "null" || -z "$current_flags" ]] && current_flags="{}"
+
+  # Update the flag
+  local new_flags
+  new_flags=$(echo "$current_flags" | jq --arg f "$flag" --arg v "$value" '.[$f] = $v')
+
+  # Re-upsert the agent with updated flags
+  local updated
+  updated=$(echo "$agent_json" | jq --arg flags "$new_flags" '.[0] | .flags = $flags')
+  milvus_upsert "agents" "[$updated]"
+}
+
+# Get a flag value from an agent
+get_agent_flag() {
+  local agent_name="$1"
+  local flag="$2"
+
+  local agent_json
+  agent_json=$(milvus_query "agents" "id == $(db_quote "$agent_name")" "flags" 1)
+  if [[ $(echo "$agent_json" | jq 'length') -eq 0 ]]; then
+    echo ""
+    return
+  fi
+
+  local flags
+  flags=$(echo "$agent_json" | jq -r '.[0].flags // "{}"')
+  [[ "$flags" == "null" || -z "$flags" ]] && flags="{}"
+
+  echo "$flags" | jq -r --arg f "$flag" '.[$f] // ""'
+}
+
+# Clear a flag from an agent
+clear_agent_flag() {
+  local agent_name="$1"
+  local flag="$2"
+
+  # Get current agent data
+  local agent_json
+  agent_json=$(milvus_query "agents" "id == $(db_quote "$agent_name")" "*" 1)
+  if [[ $(echo "$agent_json" | jq 'length') -eq 0 ]]; then
+    return 1
+  fi
+
+  # Get or initialize flags field
+  local current_flags
+  current_flags=$(echo "$agent_json" | jq -r '.[0].flags // "{}"')
+  [[ "$current_flags" == "null" || -z "$current_flags" ]] && current_flags="{}"
+
+  # Remove the flag
+  local new_flags
+  new_flags=$(echo "$current_flags" | jq --arg f "$flag" 'del(.[$f])')
+
+  # Re-upsert the agent with updated flags
+  local updated
+  updated=$(echo "$agent_json" | jq --arg flags "$new_flags" '.[0] | .flags = $flags')
+  milvus_upsert "agents" "[$updated]"
+}
+
+# ============================================================================
 # METRICS HELPERS
 # ============================================================================
 

@@ -76,11 +76,37 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 TOOL_RESULT=$(echo "$INPUT" | jq -r '.tool_result // empty')
 
-if [ -z "$WORKING_DIR" ] || [ -z "$SESSION_ID" ] || [ -z "$FILE_PATH" ]; then
+if [ -z "$WORKING_DIR" ] || [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
-# Only handle Write and Edit tools
+# Handle ExitPlanMode - set awaiting_task flag
+if [ "$TOOL_NAME" = "ExitPlanMode" ]; then
+  HIVEMIND_DIR=$(find_hivemind_dir "$WORKING_DIR")
+  if [ -z "$HIVEMIND_DIR" ]; then
+    exit 0
+  fi
+  export HIVEMIND_DIR
+
+  if ! milvus_ready; then
+    exit 0
+  fi
+
+  AGENT_TTY=$(get_current_tty)
+  AGENT_NAME=$(lookup_agent_name "$AGENT_TTY" "$SESSION_ID")
+
+  if [ -n "$AGENT_NAME" ]; then
+    set_agent_flag "$AGENT_NAME" "awaiting_task" "1"
+  fi
+  exit 0
+fi
+
+# For Write/Edit, require file path
+if [ -z "$FILE_PATH" ]; then
+  exit 0
+fi
+
+# Only handle Write and Edit tools beyond this point
 if [ "$TOOL_NAME" != "Write" ] && [ "$TOOL_NAME" != "Edit" ]; then
   exit 0
 fi

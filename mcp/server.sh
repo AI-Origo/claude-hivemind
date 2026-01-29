@@ -90,6 +90,38 @@ lookup_agent_name() {
   echo "$agent_name"
 }
 
+# Derive TTY from process tree (fallback when not provided by client)
+derive_tty() {
+  local pid=$$
+  local tty=""
+  while [[ -n "$pid" && "$pid" != "1" ]]; do
+    local ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [[ -n "$ptty" && "$ptty" != "??" ]]; then
+      tty="/dev/$ptty"
+      break
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  done
+  echo "$tty"
+}
+
+# Get HIVEMIND_DIR for the current TTY (set by session-start hook)
+# This ensures MCP server uses the same collection as the hook
+resolve_hivemind_dir() {
+  local tty=$(derive_tty)
+  if [[ -n "$tty" ]]; then
+    local tty_key=$(echo "$tty" | tr '/' '_')
+    local dir_file="/tmp/hivemind-dir-${tty_key}"
+    if [[ -f "$dir_file" ]]; then
+      local dir=$(cat "$dir_file")
+      if [[ -n "$dir" && -d "$dir" ]]; then
+        export HIVEMIND_DIR="$dir"
+        log "HIVEMIND_DIR resolved from TTY $tty: $dir"
+      fi
+    fi
+  fi
+}
+
 cleanup() {
   # MCP server no longer registers agents - hooks handle all registration.
   # Nothing to clean up here.
@@ -468,6 +500,8 @@ tool_task() {
   else
     # Set new task and clear last_task
     upsert_agent "$agent_name" "$session" "$tty_val" "$started_at" "$ended_at" "$description" ""
+    # Clear awaiting_task flag since task is now set
+    clear_agent_flag "$agent_name" "awaiting_task"
     text_result "Task set: \"$description\""
   fi
 }
@@ -652,6 +686,10 @@ handle_tools_list() {
 
 handle_tools_call() {
   local id="$1" line="$2"
+
+  # Resolve HIVEMIND_DIR for current TTY before any tool runs
+  resolve_hivemind_dir
+
   local tool=$(echo "$line" | jq -r '.params.name')
   local args=$(echo "$line" | jq -r '.params.arguments // {}')
 
@@ -659,11 +697,11 @@ handle_tools_call() {
     hive_whoami)
       local sid=$(echo "$args" | jq -r '.session_id // ""')
       local tty=$(echo "$args" | jq -r '.tty // ""')
+      # Derive TTY automatically if not provided
       if [[ -z "$sid" && -z "$tty" ]]; then
-        send_error "$id" "-32602" "Missing session_id or tty"
-      else
-        send_response "$id" "$(tool_whoami "$sid" "$tty")"
+        tty=$(derive_tty)
       fi
+      send_response "$id" "$(tool_whoami "$sid" "$tty")"
       ;;
     hive_agents)  send_response "$id" "$(tool_agents)" ;;
     hive_status)  send_response "$id" "$(tool_status)" ;;
@@ -674,11 +712,12 @@ handle_tools_call() {
       local tty=$(echo "$args" | jq -r '.tty // ""')
       local target=$(echo "$args" | jq -r '.target // ""')
       local body=$(echo "$args" | jq -r '.body // ""')
-      log "hive_message parsed: sid='$sid' tty='$tty' target='$target' body='$body'"
+      # Derive TTY automatically if not provided
       if [[ -z "$sid" && -z "$tty" ]]; then
-        log "hive_message ERROR: Missing session_id and tty"
-        send_error "$id" "-32602" "Missing session_id or tty"
-      elif [[ -z "$target" || -z "$body" ]]; then
+        tty=$(derive_tty)
+      fi
+      log "hive_message parsed: sid='$sid' tty='$tty' target='$target' body='$body'"
+      if [[ -z "$target" || -z "$body" ]]; then
         log "hive_message ERROR: Missing target or body"
         send_error "$id" "-32602" "Missing required parameters: target and body"
       else
@@ -690,11 +729,11 @@ handle_tools_call() {
       local sid=$(echo "$args" | jq -r '.session_id // ""')
       local tty=$(echo "$args" | jq -r '.tty // ""')
       local desc=$(echo "$args" | jq -r '.description // ""')
+      # Derive TTY automatically if not provided
       if [[ -z "$sid" && -z "$tty" ]]; then
-        send_error "$id" "-32602" "Missing session_id or tty"
-      else
-        send_response "$id" "$(tool_task "$sid" "$desc" "$tty")"
+        tty=$(derive_tty)
       fi
+      send_response "$id" "$(tool_task "$sid" "$desc" "$tty")"
       ;;
     hive_changes)
       local count=$(echo "$args" | jq -r '.count // 20')
@@ -705,11 +744,11 @@ handle_tools_call() {
       local tty=$(echo "$args" | jq -r '.tty // ""')
       local limit=$(echo "$args" | jq -r '.limit // ""')
       local unread_only=$(echo "$args" | jq -r '.unread_only // ""')
+      # Derive TTY automatically if not provided
       if [[ -z "$sid" && -z "$tty" ]]; then
-        send_error "$id" "-32602" "Missing session_id or tty"
-      else
-        send_response "$id" "$(tool_inbox "$sid" "$limit" "$unread_only" "$tty")"
+        tty=$(derive_tty)
       fi
+      send_response "$id" "$(tool_inbox "$sid" "$limit" "$unread_only" "$tty")"
       ;;
     hive_setup)
       send_response "$id" "$(tool_setup)"
