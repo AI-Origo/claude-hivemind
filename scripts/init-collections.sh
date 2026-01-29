@@ -1,8 +1,34 @@
 #!/bin/bash
 # Initialize Milvus collections for Hivemind
-# Creates all 11 collections with appropriate schemas
+# Creates all collections with appropriate schemas (project-scoped)
 
 set -euo pipefail
+
+# Get the script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Find .hivemind directory by searching up from current directory
+find_hivemind_dir() {
+    local dir="${1:-$(pwd)}"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -d "$dir/.hivemind" ]]; then
+            echo "$dir/.hivemind"
+            return 0
+        fi
+        dir=$(dirname "$dir")
+    done
+    return 1
+}
+
+HIVEMIND_DIR=$(find_hivemind_dir)
+if [[ -z "$HIVEMIND_DIR" ]]; then
+    echo "Error: .hivemind directory not found. Run from a project with hivemind initialized."
+    exit 1
+fi
+
+PROJECT_ROOT=$(dirname "$HIVEMIND_DIR")
+PROJECT_NAME=$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
+COLLECTION_PREFIX="${PROJECT_NAME}_hivemind"
 
 # Configuration
 MILVUS_HOST="${MILVUS_HOST:-localhost}"
@@ -98,7 +124,7 @@ create_vector_collection() {
 
 # Create sequences collection for ID generation
 create_sequences_collection() {
-  local name="hivemind_sequences"
+  local name="${COLLECTION_PREFIX}_sequences"
 
   if collection_exists "$name"; then
     echo "  Collection $name already exists, skipping"
@@ -144,6 +170,8 @@ create_sequences_collection() {
 }
 
 echo "Initializing Hivemind Milvus collections..."
+echo "  Project: $PROJECT_NAME"
+echo "  Collection prefix: $COLLECTION_PREFIX"
 echo "  URL: ${MILVUS_URL}"
 echo "  Database: ${DB_NAME}"
 echo ""
@@ -159,20 +187,21 @@ fi
 
 # Create placeholder collections (8-dim vectors for non-vector data)
 echo "Creating placeholder collections..."
-create_placeholder_collection "hivemind_agents" "Agent state and coordination"
-create_placeholder_collection "hivemind_file_locks" "Concurrent file edit prevention"
-create_placeholder_collection "hivemind_messages" "Inter-agent messaging"
-create_placeholder_collection "hivemind_changelog" "File change audit log"
-create_placeholder_collection "hivemind_metrics" "Observability metrics"
-create_placeholder_collection "hivemind_context_injections" "Token budget tracking"
+create_placeholder_collection "${COLLECTION_PREFIX}_agents" "Agent state and coordination"
+create_placeholder_collection "${COLLECTION_PREFIX}_file_locks" "Concurrent file edit prevention"
+create_placeholder_collection "${COLLECTION_PREFIX}_messages" "Inter-agent messaging"
+create_placeholder_collection "${COLLECTION_PREFIX}_changelog" "File change audit log"
+create_placeholder_collection "${COLLECTION_PREFIX}_metrics" "Observability metrics"
+create_placeholder_collection "${COLLECTION_PREFIX}_context_injections" "Token budget tracking"
+create_placeholder_collection "${COLLECTION_PREFIX}_wake_queue" "Sequential agent wakeup queue"
 
 # Create vector collections (3072-dim for semantic search)
 echo ""
 echo "Creating vector collections..."
-create_vector_collection "hivemind_tasks" "Task queue with semantic search"
-create_vector_collection "hivemind_knowledge" "Knowledge base with embeddings"
-create_vector_collection "hivemind_memory" "Key-value store with embeddings"
-create_vector_collection "hivemind_decisions" "Decision log with embeddings"
+create_vector_collection "${COLLECTION_PREFIX}_tasks" "Task queue with semantic search"
+create_vector_collection "${COLLECTION_PREFIX}_knowledge" "Knowledge base with embeddings"
+create_vector_collection "${COLLECTION_PREFIX}_memory" "Key-value store with embeddings"
+create_vector_collection "${COLLECTION_PREFIX}_decisions" "Decision log with embeddings"
 
 # Create sequences collection
 echo ""
@@ -186,6 +215,6 @@ echo "Collection initialization complete!"
 echo ""
 echo "Verifying collections:"
 result=$(milvus_post "/v2/vectordb/collections/list" "{\"dbName\":\"${DB_NAME}\"}" 2>/dev/null)
-echo "$result" | jq -r '.data[]' 2>/dev/null | grep "^hivemind_" | while read -r col; do
+echo "$result" | jq -r '.data[]' 2>/dev/null | grep "^${PROJECT_NAME}_hivemind_" | while read -r col; do
   echo "  - $col"
 done

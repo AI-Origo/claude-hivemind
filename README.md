@@ -470,6 +470,9 @@ Message sent to bravo (idle - waking agent): "Need your help with the API design
 
 The idle agent's terminal receives "New message!" which triggers Claude to check for pending messages.
 
+**How Wake-Up Works:**
+Wake requests are queued and processed sequentially by a singleton background process. This prevents race conditions when multiple agents need to be woken simultaneously (e.g., during broadcasts).
+
 **Requirements:**
 - macOS with iTerm2
 - iTerm2 automation permissions enabled (see Quick Start)

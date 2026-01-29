@@ -25,6 +25,23 @@ get_db_log_path() {
     echo "$hivemind_dir/logs/db.log"
 }
 
+# Get collection prefix from HIVEMIND_DIR (directory containing .hivemind)
+# Called lazily since HIVEMIND_DIR may not be set when db.sh is sourced
+# Returns: <project>_hivemind (e.g., euskb_hivemind)
+get_collection_prefix() {
+    if [[ -n "${HIVEMIND_DIR:-}" ]]; then
+        local project_root
+        project_root=$(dirname "$HIVEMIND_DIR")
+        local project_name
+        project_name=$(basename "$project_root")
+        # Sanitize for Milvus: lowercase, only [a-z_] allowed
+        project_name=$(echo "${project_name,,}" | sed 's/[^a-z]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
+        echo "${project_name}_hivemind"
+    else
+        echo "default_hivemind"
+    fi
+}
+
 # Generic POST request to Milvus
 # Args:
 #   $1 - endpoint (e.g., /v2/vectordb/entities/query)
@@ -69,20 +86,21 @@ milvus_health() {
 # Check if Milvus is available and collections are initialized
 # Returns: 0 if ready, 1 if not
 milvus_ready() {
+    local collection="$(get_collection_prefix)_agents"
     local result
-    result=$(milvus_post "/v2/vectordb/collections/has" "{\"dbName\":\"${MILVUS_DB}\",\"collectionName\":\"hivemind_agents\"}" 2>/dev/null)
+    result=$(milvus_post "/v2/vectordb/collections/has" "{\"dbName\":\"${MILVUS_DB}\",\"collectionName\":\"$collection\"}" 2>/dev/null)
     [[ $(echo "$result" | jq -r '.data.has // false') == "true" ]]
 }
 
 # Query entities from a collection
 # Args:
-#   $1 - collection name (without hivemind_ prefix)
+#   $1 - collection name (without prefix)
 #   $2 - filter expression (Milvus filter syntax)
 #   $3 - output fields (comma-separated, optional)
 #   $4 - limit (optional, default 100)
 # Returns: JSON array of matching entities
 milvus_query() {
-    local collection="hivemind_$1"
+    local collection="$(get_collection_prefix)_$1"
     local filter="$2"
     local output_fields="${3:-*}"
     local limit="${4:-100}"
@@ -117,10 +135,10 @@ milvus_query() {
 # Flush collection to ensure writes are visible to subsequent reads
 # This provides read-after-write consistency for cross-agent visibility
 # Args:
-#   $1 - collection name (without hivemind_ prefix)
+#   $1 - collection name (without prefix)
 # Returns: 0 on success, 1 on error
 milvus_flush() {
-    local collection="hivemind_$1"
+    local collection="$(get_collection_prefix)_$1"
 
     local body
     body=$(jq -n \
@@ -135,11 +153,11 @@ milvus_flush() {
 
 # Insert entities into a collection
 # Args:
-#   $1 - collection name (without hivemind_ prefix)
+#   $1 - collection name (without prefix)
 #   $2 - JSON array of entities to insert
 # Returns: 0 on success, 1 on error
 milvus_insert() {
-    local collection="hivemind_$1"
+    local collection="$(get_collection_prefix)_$1"
     local data="$2"
 
     local body
@@ -163,11 +181,11 @@ milvus_insert() {
 
 # Upsert entities into a collection (insert or update)
 # Args:
-#   $1 - collection name (without hivemind_ prefix)
+#   $1 - collection name (without prefix)
 #   $2 - JSON array of entities to upsert
 # Returns: 0 on success, 1 on error
 milvus_upsert() {
-    local collection="hivemind_$1"
+    local collection="$(get_collection_prefix)_$1"
     local data="$2"
 
     local body
@@ -191,11 +209,11 @@ milvus_upsert() {
 
 # Delete entities from a collection by filter
 # Args:
-#   $1 - collection name (without hivemind_ prefix)
+#   $1 - collection name (without prefix)
 #   $2 - filter expression (Milvus filter syntax)
 # Returns: 0 on success, 1 on error
 milvus_delete() {
-    local collection="hivemind_$1"
+    local collection="$(get_collection_prefix)_$1"
     local filter="$2"
 
     local body
@@ -212,11 +230,11 @@ milvus_delete() {
 
 # Delete entities by ID
 # Args:
-#   $1 - collection name (without hivemind_ prefix)
+#   $1 - collection name (without prefix)
 #   $2 - JSON array of IDs to delete
 # Returns: 0 on success, 1 on error
 milvus_delete_by_ids() {
-    local collection="hivemind_$1"
+    local collection="$(get_collection_prefix)_$1"
     local ids="$2"
 
     local body
@@ -233,14 +251,14 @@ milvus_delete_by_ids() {
 
 # Vector similarity search
 # Args:
-#   $1 - collection name (without hivemind_ prefix)
+#   $1 - collection name (without prefix)
 #   $2 - embedding vector as JSON array
 #   $3 - filter expression (optional)
 #   $4 - limit (optional, default 10)
 #   $5 - output fields (comma-separated, optional)
 # Returns: JSON array of matching entities with distances
 milvus_search() {
-    local collection="hivemind_$1"
+    local collection="$(get_collection_prefix)_$1"
     local vector="$2"
     local filter="${3:-}"
     local limit="${4:-10}"
@@ -630,6 +648,42 @@ release_lock() {
 release_agent_locks() {
     local agent_name="$1"
     milvus_delete "file_locks" "agent_name == $(db_quote "$agent_name")"
+}
+
+# ============================================================================
+# WAKE QUEUE HELPERS
+# ============================================================================
+
+# Insert a wake request into the queue
+insert_wake_request() {
+    local tty="$1"
+    local id="wake-$(date +%s%N)-$$"
+    local created_at
+    created_at=$(get_timestamp)
+
+    local data
+    data=$(jq -n \
+        --arg id "$id" \
+        --arg tty "$tty" \
+        --argjson created_at "$created_at" \
+        --argjson embedding "$PLACEHOLDER_VECTOR" \
+        '[{id:$id,tty:$tty,created_at:$created_at,embedding:$embedding}]')
+
+    milvus_insert "wake_queue" "$data"
+}
+
+# Get the oldest wake request from the queue
+get_next_wake_request() {
+    local result
+    result=$(milvus_query "wake_queue" "created_at > 0" "*" 100)
+    echo "$result" | jq -c 'sort_by(.created_at) | .[0] // empty'
+}
+
+# Delete a wake request by ID
+delete_wake_request() {
+    local id="$1"
+    milvus_delete "wake_queue" "id == $(db_quote "$id")"
+    milvus_flush "wake_queue"
 }
 
 # ============================================================================
