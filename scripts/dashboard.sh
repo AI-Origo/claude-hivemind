@@ -2,7 +2,7 @@
 # dashboard.sh - Top-like terminal UI for Hivemind monitoring
 #
 # Usage:
-#   hivemind dashboard           # Live dashboard (refreshes every 2s)
+#   hivemind dashboard           # Live dashboard (refreshes every 5s)
 #   hivemind dashboard --once    # Single snapshot
 #
 # Features:
@@ -66,6 +66,9 @@ PURPLE="\033[0;35m"
 CYAN="\033[0;36m"
 WHITE="\033[0;37m"
 
+# Clear to end of line (prevents stale content)
+EOL="\033[K"
+
 # Box drawing characters
 H_LINE="─"
 V_LINE="│"
@@ -95,12 +98,12 @@ render_dashboard() {
   local width=$(get_width)
   local now=$(date +"%H:%M:%S")
 
-  # Clear screen
-  clear
+  # Move cursor to home position (no flicker)
+  tput home
 
   # Header
-  echo -e "${BOLD}${TL_CORNER}${H_LINE} HIVEMIND DASHBOARD ${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE} ${now} ${H_LINE}${TR_CORNER}${RESET}"
-  echo -e "${V_LINE}${RESET}"
+  echo -e "${BOLD}${TL_CORNER}${H_LINE} HIVEMIND DASHBOARD ${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE}${H_LINE} ${now} ${H_LINE}${TR_CORNER}${RESET}${EOL}"
+  echo -e "${V_LINE}${RESET}${EOL}"
 
   # ===== AGENTS SECTION =====
   # Count active and idle agents (active = has current_task, idle = no current_task)
@@ -122,8 +125,8 @@ render_dashboard() {
   local offline_agents=$(milvus_query "agents" "ended_at > 0" "id" 100)
   local offline_count=$(echo "$offline_agents" | jq 'length')
 
-  echo -e "${V_LINE} ${BOLD}AGENTS${RESET}          active: ${GREEN}$active_count${RESET}  idle: ${YELLOW}$idle_count${RESET}  offline: ${DIM}$offline_count${RESET}"
-  echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))"
+  echo -e "${V_LINE} ${BOLD}AGENTS${RESET}          active: ${GREEN}$active_count${RESET}  idle: ${YELLOW}$idle_count${RESET}  offline: ${DIM}$offline_count${RESET}${EOL}"
+  echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))${EOL}"
 
   # List agents (active first, then offline)
   local agents=$(milvus_query "agents" "started_at > 0" "name,current_task,last_task,ended_at" 100)
@@ -159,10 +162,10 @@ render_dashboard() {
       display_task="${display_task:0:$max_task_len}..."
     fi
 
-    printf "${V_LINE}  ${status_color}%-8s${RESET} [${status_color}%s${RESET}] %s\n" "$name" "$status" "$display_task"
+    printf "${V_LINE}  ${status_color}%-8s${RESET} [${status_color}%s${RESET}] %s${EOL}\n" "$name" "$status" "$display_task"
   done <<< "$agents"
 
-  echo -e "${V_LINE}"
+  echo -e "${V_LINE}${EOL}"
 
   # ===== TASKS SECTION =====
   local pending=$(milvus_query "tasks" "state == \"pending\"" "id" 100 | jq 'length')
@@ -170,8 +173,8 @@ render_dashboard() {
   local in_progress=$(echo "$in_progress_json" | jq 'length')
   local review=$(milvus_query "tasks" "state == \"review\"" "id" 100 | jq 'length')
 
-  echo -e "${V_LINE} ${BOLD}TASKS${RESET}      pending: ${CYAN}$pending${RESET}  active: ${GREEN}$in_progress${RESET}  review: ${PURPLE}$review${RESET}"
-  echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))"
+  echo -e "${V_LINE} ${BOLD}TASKS${RESET}      pending: ${CYAN}$pending${RESET}  active: ${GREEN}$in_progress${RESET}  review: ${PURPLE}$review${RESET}${EOL}"
+  echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))${EOL}"
 
   # List recent tasks (not done)
   local tasks=$(milvus_query "tasks" "state != \"done\"" "seq_id,title,state,assignee" 100)
@@ -202,17 +205,17 @@ render_dashboard() {
     local assignee_str=""
     [[ -n "$assignee" ]] && assignee_str=" <- $assignee"
 
-    printf "${V_LINE}  #%-3d [${state_color}%-11s${RESET}] %s%s\n" "$id" "$state" "$title" "$assignee_str"
+    printf "${V_LINE}  #%-3d [${state_color}%-11s${RESET}] %s%s${EOL}\n" "$id" "$state" "$title" "$assignee_str"
   done < <(echo "$tasks" | jq -c '.[]' 2>/dev/null || echo "")
 
   # Note: Blocked task detection would require parsing depends_on JSON array
   # Skipping for now as Milvus doesn't have good support for array contains
 
-  echo -e "${V_LINE}"
+  echo -e "${V_LINE}${EOL}"
 
   # ===== HOTSPOTS SECTION =====
-  echo -e "${V_LINE} ${BOLD}HOTSPOTS${RESET} (files with most edits today)"
-  echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))"
+  echo -e "${V_LINE} ${BOLD}HOTSPOTS${RESET} (files with most edits today)${EOL}"
+  echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))${EOL}"
 
   # Get changelog entries from last 24 hours and aggregate with jq
   local cutoff=$(($(get_timestamp) - 86400))
@@ -248,19 +251,19 @@ render_dashboard() {
       file="...${file: -$((max_file_len - 3))}"
     fi
 
-    printf "${V_LINE}  %-${max_file_len}s ${YELLOW}%s${DIM}%s${RESET} %d\n" "$file" "$bar" "$empty" "$count"
+    printf "${V_LINE}  %-${max_file_len}s ${YELLOW}%s${DIM}%s${RESET} %d${EOL}\n" "$file" "$bar" "$empty" "$count"
   done < <(echo "$hotspots" | jq -c '.[]' 2>/dev/null || echo "")
 
   # If no hotspots
   if [[ $(echo "$hotspots" | jq 'length') -eq 0 ]]; then
-    echo -e "${V_LINE}  ${DIM}No file edits in the last 24 hours${RESET}"
+    echo -e "${V_LINE}  ${DIM}No file edits in the last 24 hours${RESET}${EOL}"
   fi
 
-  echo -e "${V_LINE}"
+  echo -e "${V_LINE}${EOL}"
 
   # ===== METRICS SECTION =====
-  echo -e "${V_LINE} ${BOLD}METRICS${RESET} (24h)"
-  echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))"
+  echo -e "${V_LINE} ${BOLD}METRICS${RESET} (24h)${EOL}"
+  echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))${EOL}"
 
   local completed=$(get_metrics_since "$cutoff" "task_completed" | jq 'length')
   local approved=$(get_metrics_since "$cutoff" "review_approved" | jq 'length')
@@ -270,16 +273,16 @@ render_dashboard() {
   local hottest_file=$(echo "$hotspots" | jq -r '.[0].file_path // "none"')
   local hottest_count=$(echo "$hotspots" | jq -r '.[0].edit_count // 0')
 
-  echo -e "${V_LINE}  Tasks completed: ${GREEN}$completed${RESET}"
-  echo -e "${V_LINE}  Reviews: ${GREEN}$approved${RESET} approved, ${RED}$rejected${RESET} rejected"
+  echo -e "${V_LINE}  Tasks completed: ${GREEN}$completed${RESET}${EOL}"
+  echo -e "${V_LINE}  Reviews: ${GREEN}$approved${RESET} approved, ${RED}$rejected${RESET} rejected${EOL}"
   if [[ "$hottest_file" != "none" && "$hottest_file" != "null" ]]; then
-    echo -e "${V_LINE}  Hottest file: ${YELLOW}$hottest_file${RESET} ($hottest_count edits)"
+    echo -e "${V_LINE}  Hottest file: ${YELLOW}$hottest_file${RESET} ($hottest_count edits)${EOL}"
   fi
 
-  echo -e "${V_LINE}"
+  echo -e "${V_LINE}${EOL}"
 
   # Footer
-  echo -e "${BL_CORNER}$(draw_line "${H_LINE}" | head -c $((width - 30)))${H_LINE}${H_LINE} q: quit  r: refresh ${H_LINE}${BR_CORNER}"
+  echo -e "${BL_CORNER}$(draw_line "${H_LINE}" | head -c $((width - 30)))${H_LINE}${H_LINE} q: quit  r: refresh ${H_LINE}${BR_CORNER}${EOL}"
 }
 
 # Main loop
@@ -299,7 +302,7 @@ else
     render_dashboard
 
     # Wait for keypress or timeout
-    if read -t 2 -n 1 key; then
+    if read -t 5 -n 1 key; then
       case "$key" in
         q|Q) break ;;
         r|R) continue ;;
