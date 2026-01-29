@@ -613,6 +613,15 @@ tool_setup() {
   fi
   output+="✓ Status line config installed to ~/.claude/settings.json\n"
 
+  # Step 3: Update version file
+  local plugin_json="$SCRIPT_DIR/../.claude-plugin/plugin.json"
+  if [[ -f "$plugin_json" && -d "$HIVEMIND_DIR" ]]; then
+    local version
+    version=$(jq -r '.version // "unknown"' "$plugin_json")
+    echo "$version" > "$HIVEMIND_DIR/version.txt"
+    output+="✓ Version updated to $version\n"
+  fi
+
   output+="\nIMPORTANT! For semantic search across tasks, knowledge, and memory:\n"
   output+="  cp .hivemind/.env.example .hivemind/.env\n"
   output+="  # Then add your OpenAI API key to .hivemind/.env\n"

@@ -56,6 +56,14 @@ export HIVEMIND_DIR
 # Copy templates (creates .hivemind directory if needed)
 db_full_init
 
+# Write version file from plugin.json (before Milvus check so it always updates)
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PLUGIN_JSON="$PLUGIN_ROOT/.claude-plugin/plugin.json"
+if [[ -f "$PLUGIN_JSON" ]]; then
+  VERSION=$(jq -r '.version // "unknown"' "$PLUGIN_JSON")
+  echo "$VERSION" > "$HIVEMIND_DIR/version.txt"
+fi
+
 # Check if Milvus is available - if not, exit silently (user should run start-milvus.sh)
 if ! milvus_ready; then
   exit 0
@@ -63,14 +71,6 @@ fi
 
 # Current timestamp (Unix epoch)
 NOW=$(get_timestamp)
-
-# Write version file from plugin.json
-PLUGIN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PLUGIN_JSON="$PLUGIN_ROOT/.claude-plugin/plugin.json"
-if [[ -f "$PLUGIN_JSON" ]]; then
-  VERSION=$(jq -r '.version // "unknown"' "$PLUGIN_JSON")
-  echo "$VERSION" > "$HIVEMIND_DIR/version.txt"
-fi
 
 # Determine agent's TTY by walking up process tree
 AGENT_TTY=""
