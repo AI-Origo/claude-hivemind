@@ -35,7 +35,7 @@ get_collection_prefix() {
         local project_name
         project_name=$(basename "$project_root")
         # Sanitize for Milvus: lowercase, only [a-z_] allowed
-        project_name=$(echo "${project_name,,}" | sed 's/[^a-z]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
+        project_name=$(echo "$project_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
         echo "${project_name}_hivemind"
     else
         echo "default_hivemind"

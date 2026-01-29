@@ -100,15 +100,22 @@ if [[ -n "$existing_agent" ]]; then
 fi
 
 # Priority 2: Check for TTY-based recovery (same terminal recovers same agent)
+# Only recover if: agent is still active OR there are other active agents
+# When no active agents exist, start fresh from "alfa"
 if [[ -z "$ASSIGNED_NAME" && -n "$AGENT_TTY" ]]; then
   tty_agent_json=$(milvus_query "agents" "tty == $(db_quote "$AGENT_TTY")" "*" 1)
   tty_agent=$(echo "$tty_agent_json" | jq -r '.[0].name // empty')
   if [[ -n "$tty_agent" ]]; then
-    ASSIGNED_NAME="$tty_agent"
-    # Update agent with new session, clear ended_at, update started_at
-    current_task=$(echo "$tty_agent_json" | jq -r '.[0].current_task // empty')
-    last_task=$(echo "$tty_agent_json" | jq -r '.[0].last_task // empty')
-    upsert_agent "$ASSIGNED_NAME" "$SESSION_ID" "$AGENT_TTY" "$NOW" 0 "$current_task" "$last_task"
+    tty_agent_ended=$(echo "$tty_agent_json" | jq -r '.[0].ended_at // 0')
+    active_count=$(get_active_agents | jq 'length')
+    # Recover if agent is active OR there are other active agents
+    if [[ "$tty_agent_ended" -lt 1 || "$active_count" -gt 0 ]]; then
+      ASSIGNED_NAME="$tty_agent"
+      # Update agent with new session, clear ended_at, update started_at
+      current_task=$(echo "$tty_agent_json" | jq -r '.[0].current_task // empty')
+      last_task=$(echo "$tty_agent_json" | jq -r '.[0].last_task // empty')
+      upsert_agent "$ASSIGNED_NAME" "$SESSION_ID" "$AGENT_TTY" "$NOW" 0 "$current_task" "$last_task"
+    fi
   fi
 fi
 
@@ -142,6 +149,12 @@ else
   current_task=$(echo "$existing" | jq -r '.[0].current_task // empty')
   last_task=$(echo "$existing" | jq -r '.[0].last_task // empty')
   upsert_agent "$ASSIGNED_NAME" "$SESSION_ID" "$AGENT_TTY" "$NOW" 0 "$current_task" "$last_task"
+fi
+
+# Store HIVEMIND_DIR for MCP server to use (keyed by TTY)
+if [[ -n "$AGENT_TTY" ]]; then
+  tty_key=$(echo "$AGENT_TTY" | tr '/' '_')
+  echo "$HIVEMIND_DIR" > "/tmp/hivemind-dir-${tty_key}"
 fi
 
 # Gather info about other active agents
