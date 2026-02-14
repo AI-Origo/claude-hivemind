@@ -18,7 +18,6 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WAKE_SCRIPT="$SCRIPT_DIR/../scripts/utils/wake-agent.sh"
 START_SCRIPT="$SCRIPT_DIR/../scripts/start-milvus.sh"
-WAKE_LOCK="/tmp/hivemind-wake-processor.lock"
 
 # Debug logging (defined early so we can log during startup)
 MCP_DEBUG_LOG="/tmp/hivemind-mcp-debug.log"
@@ -155,37 +154,7 @@ get_agent_status() {
   fi
 }
 
-# Process the wake queue sequentially (singleton via flock)
-process_wake_queue() {
-  exec 200>"$WAKE_LOCK"
-  if ! flock -n 200; then
-    return 0  # Another processor running
-  fi
-
-  log "process_wake_queue: processor started"
-
-  while true; do
-    local entry
-    entry=$(get_next_wake_request)
-
-    if [[ -z "$entry" || "$entry" == "null" ]]; then
-      log "process_wake_queue: queue empty, exiting"
-      break
-    fi
-
-    local tty id
-    tty=$(echo "$entry" | jq -r '.tty')
-    id=$(echo "$entry" | jq -r '.id')
-
-    log "process_wake_queue: waking $tty (id: $id)"
-    "$WAKE_SCRIPT" "$tty" >/dev/null 2>&1
-
-    delete_wake_request "$id"
-  done
-}
-
-# Wake an idle agent by queuing a wakeup request
-# Uses a queue to prevent race conditions with concurrent wakeups
+# Wake an idle agent by sending a keystroke to their iTerm session
 wake_agent() {
   local target_agent="$1"
 
@@ -208,9 +177,8 @@ wake_agent() {
     return 1
   fi
 
-  log "wake_agent: queuing wakeup for $target_agent at $agent_tty"
-  insert_wake_request "$agent_tty"
-  process_wake_queue &
+  log "wake_agent: waking $target_agent at $agent_tty"
+  "$WAKE_SCRIPT" "$agent_tty" >> "$MCP_DEBUG_LOG" 2>&1 &
 
   return 0
 }
@@ -519,6 +487,11 @@ tool_task() {
 
     # Sync agents.current_task for status line compatibility
     upsert_agent "$agent_name" "$session" "$tty_val" "$started_at" "$ended_at" "$description" ""
+    # Write status file for instant status line reads
+    if [[ -n "$tty_val" ]]; then
+      local tty_key=$(echo "$tty_val" | tr '/' '_')
+      printf '%s\n%s\n\n' "$agent_name" "$description" > "/tmp/hivemind-status-${tty_key}"
+    fi
     # Clear awaiting_task flag since task is now set
     clear_agent_flag "$agent_name" "awaiting_task"
     text_result "Task #$new_task_id set: \"$description\""
@@ -534,6 +507,11 @@ tool_task() {
 
     # Clear agents.current_task (move to last_task)
     upsert_agent "$agent_name" "$session" "$tty_val" "$started_at" "$ended_at" "" "$current_task"
+    # Update status file (task cleared, previous task moves to last_task)
+    if [[ -n "$tty_val" ]]; then
+      local tty_key=$(echo "$tty_val" | tr '/' '_')
+      printf '%s\n\n%s\n' "$agent_name" "$current_task" > "/tmp/hivemind-status-${tty_key}"
+    fi
 
     # Compute elapsed time string
     local elapsed_str=""
@@ -626,8 +604,8 @@ tool_setup() {
   # Step 2: Install status line config
   local settings_dir="$HOME/.claude"
   local settings_file="$settings_dir/settings.json"
-  # Status line queries Milvus directly for agent info (derives collection name from project)
-  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); dir=$(basename "$cwd"); hivemind='"'"''"'"'; task_info='"'"''"'"'; agent='"'"''"'"'; hivemind_dir='"'"''"'"'; d="$cwd"; while [ "$d" != "/" ]; do if [ -d "$d/.hivemind" ]; then hivemind_dir="$d/.hivemind"; break; fi; d=$(dirname "$d"); done; if [ -n "$hivemind_dir" ]; then project_root=$(dirname "$hivemind_dir"); project_name=$(basename "$project_root" | tr "[:upper:]" "[:lower:]" | sed "s/[^a-z]/_/g" | sed "s/__*/_/g" | sed "s/^_//;s/_$//"); collection="${project_name}_hivemind_agents"; pid=$$; tty=""; while [ -n "$pid" ] && [ "$pid" != "1" ]; do ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); if [ -n "$ptty" ] && [ "$ptty" != "??" ]; then tty="/dev/$ptty"; break; fi; pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); done; if [ -n "$tty" ]; then result=$(curl -sf --max-time 2 -X POST "http://localhost:19531/v2/vectordb/entities/query" -H "Authorization: Bearer root:Milvus" -H "Content-Type: application/json" -d "{\"dbName\":\"default\",\"collectionName\":\"$collection\",\"filter\":\"tty == \\\"$tty\\\" and ended_at < 1\",\"outputFields\":[\"name\",\"current_task\",\"last_task\"],\"limit\":1}" 2>/dev/null); if [ -n "$result" ]; then agent=$(echo "$result" | jq -r '"'"'.data[0].name // empty'"'"' 2>/dev/null); task=$(echo "$result" | jq -r '"'"'.data[0].current_task // empty'"'"' 2>/dev/null); lastTask=$(echo "$result" | jq -r '"'"'.data[0].last_task // empty'"'"' 2>/dev/null); fi; fi; fi; if [ -n "$agent" ]; then hivemind=$(printf '"'"'\033[1;35m[%s]\033[0m '"'"' "$agent"); if [ -n "$task" ]; then task_info=$(printf '"'"'\n\033[0;33m%s\033[0m'"'"' "$task"); elif [ -n "$lastTask" ]; then task_info=$(printf '"'"'\n\033[0;90m%s\033[0m'"'"' "$lastTask"); elif [ -f "$hivemind_dir/version.txt" ]; then version=$(cat "$hivemind_dir/version.txt"); task_info=$(printf '"'"'\n\033[0;35mhivemind v%s\033[0m'"'"' "$version"); fi; fi; git_info='"'"''"'"'; if cd "$cwd" 2>/dev/null && git rev-parse --git-dir > /dev/null 2>&1; then branch=$(git --no-optional-locks branch --show-current 2>/dev/null || git --no-optional-locks rev-parse --short HEAD 2>/dev/null); if [ -n "$branch" ]; then if [ -n "$(git --no-optional-locks status --porcelain 2>/dev/null)" ]; then git_info=$(printf '"'"' \033[1;34mgit:(\033[0;31m%s\033[1;34m) \033[0;33m✗\033[0m'"'"' "$branch"); else git_info=$(printf '"'"'\033[1;34mgit:(\033[0;31m%s\033[1;34m)\033[0m'"'"' "$branch"); fi; fi; fi; printf '"'"'%s\033[1;32m➜\033[0m  \033[0;36m%s\033[0m%s%s'"'"' "$hivemind" "$dir" "$git_info" "$task_info"'
+  # Status line reads agent info from file cache (written by hooks/MCP), falls back to Milvus
+  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); dir=$(basename "$cwd"); hivemind='"'"''"'"'; task_info='"'"''"'"'; agent='"'"''"'"'; task='"'"''"'"'; lastTask='"'"''"'"'; hivemind_dir='"'"''"'"'; d="$cwd"; while [ "$d" != "/" ]; do if [ -d "$d/.hivemind" ]; then hivemind_dir="$d/.hivemind"; break; fi; d=$(dirname "$d"); done; if [ -n "$hivemind_dir" ]; then pid=$$; tty=""; while [ -n "$pid" ] && [ "$pid" != "1" ]; do ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); if [ -n "$ptty" ] && [ "$ptty" != "??" ]; then tty="/dev/$ptty"; break; fi; pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); done; if [ -n "$tty" ]; then tty_key=$(echo "$tty" | tr '"'"'/'"'"' '"'"'_'"'"'); status_file="/tmp/hivemind-status-${tty_key}"; if [ -f "$status_file" ]; then agent=$(sed -n '"'"'1p'"'"' "$status_file"); task=$(sed -n '"'"'2p'"'"' "$status_file"); lastTask=$(sed -n '"'"'3p'"'"' "$status_file"); else project_root=$(dirname "$hivemind_dir"); project_name=$(basename "$project_root" | tr "[:upper:]" "[:lower:]" | sed "s/[^a-z]/_/g" | sed "s/__*/_/g" | sed "s/^_//;s/_$//"); collection="${project_name}_hivemind_agents"; result=$(curl -sf --max-time 2 -X POST "http://localhost:19531/v2/vectordb/entities/query" -H "Authorization: Bearer root:Milvus" -H "Content-Type: application/json" -d "{\"dbName\":\"default\",\"collectionName\":\"$collection\",\"filter\":\"tty == \\\"$tty\\\" and ended_at < 1\",\"outputFields\":[\"name\",\"current_task\",\"last_task\"],\"limit\":1}" 2>/dev/null); if [ -n "$result" ]; then agent=$(echo "$result" | jq -r '"'"'.data[0].name // empty'"'"' 2>/dev/null); task=$(echo "$result" | jq -r '"'"'.data[0].current_task // empty'"'"' 2>/dev/null); lastTask=$(echo "$result" | jq -r '"'"'.data[0].last_task // empty'"'"' 2>/dev/null); fi; fi; fi; fi; if [ -n "$agent" ]; then hivemind=$(printf '"'"'\033[1;35m[%s]\033[0m '"'"' "$agent"); if [ -n "$task" ]; then task_info=$(printf '"'"'\n\033[0;33m%s\033[0m'"'"' "$task"); elif [ -n "$lastTask" ]; then task_info=$(printf '"'"'\n\033[0;90m%s\033[0m'"'"' "$lastTask"); elif [ -f "$hivemind_dir/version.txt" ]; then version=$(cat "$hivemind_dir/version.txt"); task_info=$(printf '"'"'\n\033[0;35mhivemind v%s\033[0m'"'"' "$version"); fi; fi; git_info='"'"''"'"'; if cd "$cwd" 2>/dev/null && git rev-parse --git-dir > /dev/null 2>&1; then branch=$(git --no-optional-locks branch --show-current 2>/dev/null || git --no-optional-locks rev-parse --short HEAD 2>/dev/null); if [ -n "$branch" ]; then if [ -n "$(git --no-optional-locks status --porcelain 2>/dev/null)" ]; then git_info=$(printf '"'"' \033[1;34mgit:(\033[0;31m%s\033[1;34m) \033[0;33m✗\033[0m'"'"' "$branch"); else git_info=$(printf '"'"'\033[1;34mgit:(\033[0;31m%s\033[1;34m)\033[0m'"'"' "$branch"); fi; fi; fi; printf '"'"'%s\033[1;32m➜\033[0m  \033[0;36m%s\033[0m%s%s'"'"' "$hivemind" "$dir" "$git_info" "$task_info"'
 
   mkdir -p "$settings_dir"
 
