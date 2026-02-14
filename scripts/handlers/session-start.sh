@@ -92,6 +92,8 @@ fi
 [[ "$AGENT_TTY" == "not a tty" || "$AGENT_TTY" == "??" ]] && AGENT_TTY=""
 
 ASSIGNED_NAME=""
+current_task=""
+last_task=""
 
 # Priority 1: Check if this session already has an agent assigned
 existing_agent=$(get_agent_by_session "$SESSION_ID" | jq -r '.[0].name // empty')
@@ -155,6 +157,8 @@ fi
 if [[ -n "$AGENT_TTY" ]]; then
   tty_key=$(echo "$AGENT_TTY" | tr '/' '_')
   echo "$HIVEMIND_DIR" > "/tmp/hivemind-dir-${tty_key}"
+  # Write initial status file for instant status line reads
+  printf '%s\n%s\n%s\n' "$ASSIGNED_NAME" "$current_task" "$last_task" > "/tmp/hivemind-status-${tty_key}"
 fi
 
 # Gather info about other active agents

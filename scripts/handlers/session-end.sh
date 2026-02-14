@@ -105,6 +105,16 @@ NOW=$(get_timestamp)
 current_task=$(echo "$AGENT_JSON" | jq -r '.[0].current_task // empty')
 started_at=$(echo "$AGENT_JSON" | jq -r '.[0].started_at // 0')
 
+# Complete any in_progress tasks in the tasks collection
+active_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$AGENT_NAME") and (state == \"claimed\" or state == \"in_progress\")" "seq_id" 100)
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  task_seq_id=$(echo "$line" | jq -r '.seq_id // empty')
+  [[ -z "$task_seq_id" ]] && continue
+  update_task "$task_seq_id" "state" "done"
+  update_task "$task_seq_id" "completed_at" "$NOW"
+done < <(echo "$active_tasks" | jq -c '.[]' 2>/dev/null || echo "")
+
 # Mark agent as ended:
 # - Clear session_id
 # - Set ended_at timestamp
@@ -114,6 +124,14 @@ upsert_agent "$AGENT_NAME" "" "$AGENT_TTY" "$started_at" "$NOW" "" "$current_tas
 
 # Release file locks held by this agent
 release_agent_locks "$AGENT_NAME"
+
+# Clean up temp files
+if [[ -n "$AGENT_TTY" ]]; then
+  tty_key=$(echo "$AGENT_TTY" | tr '/' '_')
+  rm -f "/tmp/hivemind-dir-${tty_key}"
+  # Update status file (task cleared, previous task moves to last_task)
+  printf '%s\n\n%s\n' "$AGENT_NAME" "$current_task" > "/tmp/hivemind-status-${tty_key}"
+fi
 
 # Delete all messages sent to or from this agent
 milvus_delete "messages" "from_agent == $(db_quote "$AGENT_NAME")"

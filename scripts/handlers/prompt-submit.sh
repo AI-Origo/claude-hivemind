@@ -141,9 +141,9 @@ if [ -n "$MESSAGES" ]; then
   echo ""
 fi
 
-# Check for claimed tasks assigned to this agent
-claimed_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$AGENT_NAME") and (state == \"claimed\" or state == \"in_progress\")" "seq_id,title,state" 100)
-claimed_tasks=$(echo "$claimed_tasks" | jq -c 'sort_by(.seq_id)')
+# Check for active tasks assigned to this agent
+active_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$AGENT_NAME") and state == \"in_progress\"" "seq_id,title,state" 100)
+active_tasks=$(echo "$active_tasks" | jq -c 'sort_by(.seq_id)')
 TASK_REMINDER=""
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
@@ -157,7 +157,7 @@ while IFS= read -r line; do
     TASK_REMINDER="$TASK_REMINDER, "
   fi
   TASK_REMINDER="${TASK_REMINDER}#$task_id: $task_title [$task_state]"
-done < <(echo "$claimed_tasks" | jq -c '.[]' 2>/dev/null || echo "")
+done < <(echo "$active_tasks" | jq -c '.[]' 2>/dev/null || echo "")
 
 # Check for tasks in review that this agent might want to review
 review_tasks=$(milvus_query "tasks" "state == \"review\" and assignee != $(db_quote "$AGENT_NAME")" "seq_id,title,assignee" 3)
@@ -177,12 +177,14 @@ while IFS= read -r line; do
   REVIEW_REMINDER="${REVIEW_REMINDER}#$task_id: $task_title (by $task_assignee)"
 done < <(echo "$review_tasks" | jq -c '.[]' 2>/dev/null || echo "")
 
-# Always inject task recording reminder
+# Inject task tracking section
 echo "[HIVEMIND TASK TRACKING]"
-echo "You are agent $AGENT_NAME. Record your current task using hive_task so other agents can see what you're working on. When you finish processing or are waiting for user input, clear your task by calling hive_task with an empty description - never set it to 'idle', 'waiting', or similar."
 
 if [ -n "$TASK_REMINDER" ]; then
-  echo "Your active tasks: $TASK_REMINDER"
+  echo "You are agent $AGENT_NAME. Active tasks: $TASK_REMINDER"
+  echo "If the user's message changes what you're working on, call hive_task with a short description of the new activity. Only clear your task (empty description) when the work is fully complete and you have nothing left to do."
+else
+  echo "You are agent $AGENT_NAME. You have no active task. IMPORTANT: Your very first action must be to call hive_task with a short description of what you're about to do. Do this before any other tool call. Keep it set across turns until the work is fully complete, then clear it (empty description). Never set it to 'idle' or 'waiting'."
 fi
 
 if [ -n "$REVIEW_REMINDER" ]; then

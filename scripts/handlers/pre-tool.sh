@@ -193,7 +193,7 @@ echo "Message delivery check: AGENT_NAME='$AGENT_NAME', has_messages=$([[ -n \"$
 # TOOL-SPECIFIC HANDLING
 # ============================================================================
 
-# Handle EnterPlanMode - remind agent to set task as "Planning: <topic>"
+# Handle EnterPlanMode - instruct agent to set planning task
 if [[ "$TOOL_NAME" == "EnterPlanMode" ]]; then
   echo "ENTER PLAN MODE detected for agent $AGENT_NAME" >> "$DEBUG_LOG"
 
@@ -204,7 +204,7 @@ if [[ "$TOOL_NAME" == "EnterPlanMode" ]]; then
   fi
 
   if [ -n "$AGENT_NAME" ]; then
-    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND TASK TRACKING] Agent ${AGENT_NAME}: You are entering plan mode. Set your task to 'Planning: <short topic>' using hive_task so other agents know you are planning (e.g., 'Planning: auth refactor' or 'Planning: API endpoints').\n\n"
+    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND] IMPORTANT: Your very first action must be to call hive_task with description 'Planning: <short topic>' (e.g., 'Planning: auth refactor'). Do this NOW before any other tool call.\n\n"
   fi
 
   if [ -n "$COMBINED_OUTPUT" ]; then
@@ -214,7 +214,7 @@ if [[ "$TOOL_NAME" == "EnterPlanMode" ]]; then
   exit 0
 fi
 
-# Handle ExitPlanMode - remind agent to record task + show delegation guidance
+# Handle ExitPlanMode - enforce task recording + show delegation guidance
 if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
   echo "EXIT PLAN MODE detected for agent $AGENT_NAME" >> "$DEBUG_LOG"
 
@@ -225,7 +225,7 @@ if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
   fi
 
   if [ -n "$AGENT_NAME" ]; then
-    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND TASK TRACKING] Plan accepted. Agent ${AGENT_NAME}: Record this plan as your current task using hive_task so other agents can see what you are working on.\n\n"
+    COMBINED_OUTPUT="${COMBINED_OUTPUT}[HIVEMIND] IMPORTANT: Your very first action must be to call hive_task with a short description of what you're implementing (e.g., 'Implementing auth refactor'). Do this NOW before any other tool call.\n\n"
   fi
 
   # Build delegation guidance from Milvus
