@@ -759,12 +759,20 @@ create_task() {
     local title="$1"
     local description="${2:-}"
     local embedding="${3:-}"  # JSON array or empty
+    local assignee="${4:-}"
+    local initial_state="${5:-pending}"
 
     local seq_id
     seq_id=$(milvus_next_id "task_id_seq")
     local id="task-$seq_id"
     local created_at
     created_at=$(get_timestamp)
+
+    # Set claimed_at if task starts in an active state
+    local claimed_at=0
+    if [[ "$initial_state" == "in_progress" || "$initial_state" == "claimed" ]]; then
+        claimed_at="$created_at"
+    fi
 
     # Use proper embedding or null placeholder for 3072-dim
     local embed_vec
@@ -781,12 +789,12 @@ create_task() {
         --argjson seq_id "$seq_id" \
         --arg title "$title" \
         --arg description "$description" \
-        --arg state "pending" \
-        --arg assignee "" \
+        --arg state "$initial_state" \
+        --arg assignee "$assignee" \
         --arg depends_on "[]" \
         --argjson parent_id 0 \
         --argjson created_at "$created_at" \
-        --argjson claimed_at 0 \
+        --argjson claimed_at "$claimed_at" \
         --argjson completed_at 0 \
         --arg rejection_note "" \
         --argjson embedding "$embed_vec" \
