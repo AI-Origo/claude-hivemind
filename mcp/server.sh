@@ -248,9 +248,7 @@ tool_agents() {
     return
   fi
 
-  local output="HIVEMIND AGENTS
-===============
-"
+  local output=""
   local agents_json=$(get_active_agents)
   local count=0
 
@@ -258,22 +256,32 @@ tool_agents() {
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
       local name=$(echo "$line" | jq -r '.name')
-      local task=$(echo "$line" | jq -r '.current_task // ""')
-      local status="idle"
-      [[ -n "$task" ]] && status="active"
-      output+="
-Agent: $name ($status)"
-      [[ -n "$task" && "$task" != "null" ]] && output+="
-  Task: $task"
-      output+="
-  Files: (none)"
+      # Check tasks collection for in_progress tasks
+      local agent_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$name") and state == \"in_progress\"" "seq_id,title" 5)
+      local task_str=""
+      while IFS= read -r tline; do
+        [[ -z "$tline" ]] && continue
+        local tid=$(echo "$tline" | jq -r '.seq_id // empty')
+        [[ -z "$tid" ]] && continue
+        local ttitle=$(echo "$tline" | jq -r '.title // ""')
+        [[ -n "$task_str" ]] && task_str+=", "
+        task_str+="#$tid: $ttitle"
+      done < <(echo "$agent_tasks" | jq -c '.[]' 2>/dev/null || echo "")
+      # Fall back to agents.current_task if no tasks in collection
+      if [[ -z "$task_str" ]]; then
+        local fallback=$(echo "$line" | jq -r '.current_task // ""')
+        [[ -n "$fallback" && "$fallback" != "null" ]] && task_str="$fallback"
+      fi
+      if [[ -n "$task_str" ]]; then
+        output+="$name: $task_str\n"
+      else
+        output+="$name: idle\n"
+      fi
       ((count++))
     done < <(echo "$agents_json" | jq -c '.[]')
   fi
 
-  output+="
-
-Total: $count agent(s)"
+  [[ $count -eq 0 ]] && output="No active agents."
   text_result "$output"
 }
 
@@ -283,63 +291,63 @@ tool_status() {
     return
   fi
 
-  local output="HIVEMIND STATUS DASHBOARD
-=========================
-
-AGENTS
-------"
+  local output="Agents:\n"
   local agents_json=$(get_active_agents)
 
   if [[ -n "$agents_json" && "$agents_json" != "[]" ]]; then
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
       local name=$(echo "$line" | jq -r '.name')
-      local task=$(echo "$line" | jq -r '.current_task // ""')
-      [[ -z "$task" || "$task" == "null" ]] && task="(none)"
-      output+="
-$name
-  Task: $task
-  Files: (none)"
+      # Check tasks collection for in_progress tasks
+      local agent_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$name") and state == \"in_progress\"" "seq_id,title" 5)
+      local task_str=""
+      while IFS= read -r tline; do
+        [[ -z "$tline" ]] && continue
+        local tid=$(echo "$tline" | jq -r '.seq_id // empty')
+        [[ -z "$tid" ]] && continue
+        local ttitle=$(echo "$tline" | jq -r '.title // ""')
+        [[ -n "$task_str" ]] && task_str+=", "
+        task_str+="#$tid: $ttitle"
+      done < <(echo "$agent_tasks" | jq -c '.[]' 2>/dev/null || echo "")
+      # Fall back to agents.current_task
+      if [[ -z "$task_str" ]]; then
+        local fallback=$(echo "$line" | jq -r '.current_task // ""')
+        [[ -n "$fallback" && "$fallback" != "null" ]] && task_str="$fallback"
+      fi
+      if [[ -n "$task_str" ]]; then
+        output+="  $name: $task_str\n"
+      else
+        output+="  $name: idle\n"
+      fi
     done < <(echo "$agents_json" | jq -c '.[]')
+  else
+    output+="  (none)\n"
   fi
 
-  # File locks (from Milvus)
-  output+="
-
-FILE LOCKS
-----------"
+  # File locks
   local locks_json=$(milvus_query "file_locks" "locked_at > 0" "file_path,agent_name" 100)
   local lock_count=0
+  local lock_output=""
 
   if [[ -n "$locks_json" && "$locks_json" != "[]" ]]; then
     while IFS= read -r lock_line; do
       [[ -z "$lock_line" ]] && continue
       local file_path=$(echo "$lock_line" | jq -r '.file_path')
       local agent_name=$(echo "$lock_line" | jq -r '.agent_name')
-      output+="
-$file_path (held by $agent_name)"
+      lock_output+="  $file_path ($agent_name)\n"
       ((lock_count++))
     done < <(echo "$locks_json" | jq -c '.[]')
   fi
 
-  [[ $lock_count -eq 0 ]] && output+="
-No active file locks."
+  if [[ $lock_count -gt 0 ]]; then
+    output+="Locks:\n$lock_output"
+  fi
 
-  # Message summary
-  output+="
-
-MESSAGES
---------
-Messages from other agents are delivered automatically with each prompt."
-
-  # Recent changes (from Milvus)
-  output+="
-
-RECENT CHANGES
---------------"
+  # Recent changes
   local changes_json=$(get_recent_changelog 5)
 
   if [[ -n "$changes_json" && "$changes_json" != "[]" ]]; then
+    output+="Recent changes:\n"
     while IFS= read -r change; do
       [[ -z "$change" ]] && continue
       local ts_epoch=$(echo "$change" | jq -r '.timestamp // 0')
@@ -348,12 +356,8 @@ RECENT CHANGES
       local agent=$(echo "$change" | jq -r '.agent')
       local action=$(echo "$change" | jq -r '.action')
       local file_path=$(echo "$change" | jq -r '.file_path')
-      output+="
-[$ts_time] $agent: $action $file_path"
+      output+="  [$ts_time] $agent: $action $file_path\n"
     done < <(echo "$changes_json" | jq -c '.[]')
-  else
-    output+="
-No changes recorded."
   fi
 
   text_result "$output"
@@ -491,28 +495,64 @@ tool_task() {
   local started_at=$(echo "$agent_json" | jq -r '.[0].started_at // 0')
   local ended_at=$(echo "$agent_json" | jq -r '.[0].ended_at // 0')
   local current_task=$(echo "$agent_json" | jq -r '.[0].current_task // empty')
-  local last_task=$(echo "$agent_json" | jq -r '.[0].last_task // empty')
 
-  if [[ -z "$description" ]]; then
-    # Copy current_task to last_task before clearing
-    upsert_agent "$agent_name" "$session" "$tty_val" "$started_at" "$ended_at" "" "$current_task"
-    text_result "Task cleared."
-  else
-    # Set new task and clear last_task
+  # Helper: complete all in_progress tasks for this agent
+  _complete_active_tasks() {
+    local active_tasks
+    active_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$agent_name") and (state == \"claimed\" or state == \"in_progress\")" "seq_id" 100)
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      local task_seq_id=$(echo "$line" | jq -r '.seq_id // empty')
+      [[ -z "$task_seq_id" ]] && continue
+      update_task "$task_seq_id" "state" "done"
+      update_task "$task_seq_id" "completed_at" "$(get_timestamp)"
+    done < <(echo "$active_tasks" | jq -c '.[]' 2>/dev/null || echo "")
+  }
+
+  if [[ -n "$description" ]]; then
+    # Complete any existing in_progress tasks for this agent
+    _complete_active_tasks
+
+    # Create new task in tasks collection
+    local new_task_id
+    new_task_id=$(create_task "$description" "" "" "$agent_name" "in_progress")
+
+    # Sync agents.current_task for status line compatibility
     upsert_agent "$agent_name" "$session" "$tty_val" "$started_at" "$ended_at" "$description" ""
     # Clear awaiting_task flag since task is now set
     clear_agent_flag "$agent_name" "awaiting_task"
-    text_result "Task set: \"$description\""
+    text_result "Task #$new_task_id set: \"$description\""
+  else
+    # Get the earliest claimed_at from active tasks for elapsed time
+    local active_before
+    active_before=$(milvus_query "tasks" "assignee == $(db_quote "$agent_name") and (state == \"claimed\" or state == \"in_progress\")" "seq_id" 100)
+    local task_claimed_at
+    task_claimed_at=$(echo "$active_before" | jq -r '[.[].claimed_at // 0 | tonumber] | map(select(. > 0)) | min // 0')
+
+    # Complete any existing in_progress tasks for this agent
+    _complete_active_tasks
+
+    # Clear agents.current_task (move to last_task)
+    upsert_agent "$agent_name" "$session" "$tty_val" "$started_at" "$ended_at" "" "$current_task"
+
+    # Compute elapsed time string
+    local elapsed_str=""
+    if [[ "$task_claimed_at" != "0" && -n "$task_claimed_at" ]]; then
+      local now
+      now=$(get_timestamp)
+      local elapsed=$(( now - task_claimed_at ))
+      if (( elapsed < 0 )); then elapsed=0; fi
+      local mins=$(( elapsed / 60 ))
+      local secs=$(( elapsed % 60 ))
+      elapsed_str=" [${mins}m ${secs}s]"
+    fi
+    text_result "Task cleared.${elapsed_str}"
   fi
 }
 
 tool_changes() {
   local count="${1:-20}"
-  local output="HIVEMIND CHANGELOG
-==================
-
-Last $count changes:
-"
+  local output=""
 
   # Query changelog from Milvus
   local changes_json=$(get_recent_changelog "$count")
@@ -539,62 +579,15 @@ Last $count changes:
 }
 
 tool_help() {
-  text_result "HIVEMIND COMMANDS
-=================
-
-hive_setup
-  First-time setup: starts Milvus and configures status line
-  Run this once when starting with Hivemind
-
-hive_whoami
-  Get my agent identity (no parameters)
-
-hive_agents
-  List all active agents (no parameters)
-
-hive_status
-  Show coordination dashboard (no parameters)
-
-hive_message
-  Send message to another agent or broadcast
-  Parameters:
-    target (required) - Agent name (alfa, bravo, etc.) or \"all\" for broadcast
-    body (required)   - Message content
-
-hive_task
-  Set or clear my current task
-  Parameters:
-    description (optional) - Task description, omit or empty to clear
-
-hive_changes
-  View recent file changes
-  Parameters:
-    count (optional) - Number of changes to show (default 20)
-
-hive_inbox
-  View your message history
-  Parameters:
-    limit (optional) - Maximum messages to return (default 10)
-    unread_only (optional) - Only show undelivered messages (default false)
-
-hive_help
-  Show this help (no parameters)
-
-Each session gets a unique phonetic codename (alfa, bravo, charlie...).
-Names are released when the session ends.
-
-MESSAGE DELIVERY
-----------------
-Messages from other agents are delivered automatically with each prompt.
-When another agent sends you a message, you will see it prefixed with
-[HIVE AGENT MESSAGE] in your context.
-
-COORDINATION TIPS
------------------
-1. Set your task so others know what you're working on
-2. Check hive_status before editing shared files
-3. Use hive_message to coordinate on conflicts
-4. Review hive_changes to see recent activity"
+  text_result "hive_setup - First-time setup (starts Milvus, configures status line)
+hive_whoami - Get your agent name
+hive_agents - List active agents and their tasks
+hive_status - Coordination dashboard (agents, locks, recent changes)
+hive_message target=<name|all> body=<text> - Send message to agent or broadcast
+hive_task description=<text> - Set current task (empty to clear)
+hive_changes count=<n> - View recent file changes (default 20)
+hive_inbox limit=<n> unread_only=<bool> - View message history
+Messages from other agents are delivered automatically each prompt."
 }
 
 tool_setup() {
@@ -634,7 +627,7 @@ tool_setup() {
   local settings_dir="$HOME/.claude"
   local settings_file="$settings_dir/settings.json"
   # Status line queries Milvus directly for agent info (derives collection name from project)
-  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); dir=$(basename "$cwd"); hivemind='"'"''"'"'; task_info='"'"''"'"'; agent='"'"''"'"'; hivemind_dir='"'"''"'"'; d="$cwd"; while [ "$d" != "/" ]; do if [ -d "$d/.hivemind" ]; then hivemind_dir="$d/.hivemind"; break; fi; d=$(dirname "$d"); done; if [ -n "$hivemind_dir" ]; then project_root=$(dirname "$hivemind_dir"); project_name=$(basename "$project_root" | tr "[:upper:]" "[:lower:]" | sed "s/[^a-z]/_/g" | sed "s/__*/_/g" | sed "s/^_//;s/_$//"); collection="${project_name}_hivemind_agents"; pid=$$; tty=""; while [ -n "$pid" ] && [ "$pid" != "1" ]; do ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); if [ -n "$ptty" ] && [ "$ptty" != "??" ]; then tty="/dev/$ptty"; break; fi; pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); done; if [ -n "$tty" ]; then result=$(curl -sf -X POST "http://localhost:19531/v2/vectordb/entities/query" -H "Authorization: Bearer root:Milvus" -H "Content-Type: application/json" -d "{\"dbName\":\"default\",\"collectionName\":\"$collection\",\"filter\":\"tty == \\\"$tty\\\" and ended_at < 1\",\"outputFields\":[\"name\",\"current_task\",\"last_task\"],\"limit\":1}" 2>/dev/null); if [ -n "$result" ]; then agent=$(echo "$result" | jq -r '"'"'.data[0].name // empty'"'"' 2>/dev/null); task=$(echo "$result" | jq -r '"'"'.data[0].current_task // empty'"'"' 2>/dev/null); lastTask=$(echo "$result" | jq -r '"'"'.data[0].last_task // empty'"'"' 2>/dev/null); fi; fi; fi; if [ -n "$agent" ]; then hivemind=$(printf '"'"'\033[1;35m[%s]\033[0m '"'"' "$agent"); if [ -n "$task" ]; then task_info=$(printf '"'"'\n\033[0;33m%s\033[0m'"'"' "$task"); elif [ -n "$lastTask" ]; then task_info=$(printf '"'"'\n\033[0;90m%s\033[0m'"'"' "$lastTask"); elif [ -f "$hivemind_dir/version.txt" ]; then version=$(cat "$hivemind_dir/version.txt"); task_info=$(printf '"'"'\n\033[0;35mhivemind v%s\033[0m'"'"' "$version"); fi; fi; git_info='"'"''"'"'; if cd "$cwd" 2>/dev/null && git rev-parse --git-dir > /dev/null 2>&1; then branch=$(git --no-optional-locks branch --show-current 2>/dev/null || git --no-optional-locks rev-parse --short HEAD 2>/dev/null); if [ -n "$branch" ]; then if [ -n "$(git --no-optional-locks status --porcelain 2>/dev/null)" ]; then git_info=$(printf '"'"' \033[1;34mgit:(\033[0;31m%s\033[1;34m) \033[0;33m✗\033[0m'"'"' "$branch"); else git_info=$(printf '"'"'\033[1;34mgit:(\033[0;31m%s\033[1;34m)\033[0m'"'"' "$branch"); fi; fi; fi; printf '"'"'%s\033[1;32m➜\033[0m  \033[0;36m%s\033[0m%s%s'"'"' "$hivemind" "$dir" "$git_info" "$task_info"'
+  local statusline_cmd='input=$(cat); cwd=$(echo "$input" | jq -r '"'"'.workspace.current_dir'"'"'); dir=$(basename "$cwd"); hivemind='"'"''"'"'; task_info='"'"''"'"'; agent='"'"''"'"'; hivemind_dir='"'"''"'"'; d="$cwd"; while [ "$d" != "/" ]; do if [ -d "$d/.hivemind" ]; then hivemind_dir="$d/.hivemind"; break; fi; d=$(dirname "$d"); done; if [ -n "$hivemind_dir" ]; then project_root=$(dirname "$hivemind_dir"); project_name=$(basename "$project_root" | tr "[:upper:]" "[:lower:]" | sed "s/[^a-z]/_/g" | sed "s/__*/_/g" | sed "s/^_//;s/_$//"); collection="${project_name}_hivemind_agents"; pid=$$; tty=""; while [ -n "$pid" ] && [ "$pid" != "1" ]; do ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); if [ -n "$ptty" ] && [ "$ptty" != "??" ]; then tty="/dev/$ptty"; break; fi; pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '"'"' '"'"'); done; if [ -n "$tty" ]; then result=$(curl -sf --max-time 2 -X POST "http://localhost:19531/v2/vectordb/entities/query" -H "Authorization: Bearer root:Milvus" -H "Content-Type: application/json" -d "{\"dbName\":\"default\",\"collectionName\":\"$collection\",\"filter\":\"tty == \\\"$tty\\\" and ended_at < 1\",\"outputFields\":[\"name\",\"current_task\",\"last_task\"],\"limit\":1}" 2>/dev/null); if [ -n "$result" ]; then agent=$(echo "$result" | jq -r '"'"'.data[0].name // empty'"'"' 2>/dev/null); task=$(echo "$result" | jq -r '"'"'.data[0].current_task // empty'"'"' 2>/dev/null); lastTask=$(echo "$result" | jq -r '"'"'.data[0].last_task // empty'"'"' 2>/dev/null); fi; fi; fi; if [ -n "$agent" ]; then hivemind=$(printf '"'"'\033[1;35m[%s]\033[0m '"'"' "$agent"); if [ -n "$task" ]; then task_info=$(printf '"'"'\n\033[0;33m%s\033[0m'"'"' "$task"); elif [ -n "$lastTask" ]; then task_info=$(printf '"'"'\n\033[0;90m%s\033[0m'"'"' "$lastTask"); elif [ -f "$hivemind_dir/version.txt" ]; then version=$(cat "$hivemind_dir/version.txt"); task_info=$(printf '"'"'\n\033[0;35mhivemind v%s\033[0m'"'"' "$version"); fi; fi; git_info='"'"''"'"'; if cd "$cwd" 2>/dev/null && git rev-parse --git-dir > /dev/null 2>&1; then branch=$(git --no-optional-locks branch --show-current 2>/dev/null || git --no-optional-locks rev-parse --short HEAD 2>/dev/null); if [ -n "$branch" ]; then if [ -n "$(git --no-optional-locks status --porcelain 2>/dev/null)" ]; then git_info=$(printf '"'"' \033[1;34mgit:(\033[0;31m%s\033[1;34m) \033[0;33m✗\033[0m'"'"' "$branch"); else git_info=$(printf '"'"'\033[1;34mgit:(\033[0;31m%s\033[1;34m)\033[0m'"'"' "$branch"); fi; fi; fi; printf '"'"'%s\033[1;32m➜\033[0m  \033[0;36m%s\033[0m%s%s'"'"' "$hivemind" "$dir" "$git_info" "$task_info"'
 
   mkdir -p "$settings_dir"
 
