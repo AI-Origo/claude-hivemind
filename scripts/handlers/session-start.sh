@@ -77,9 +77,31 @@ if [[ "$HIVEMIND_EXISTED" == "false" ]] && milvus_ready 2>/dev/null; then
   fi
 fi
 
-# Check if Milvus is available - if not, exit silently (user should run start-milvus.sh)
+# Check if Milvus is available - if not, auto-start it
 if ! milvus_ready; then
-  exit 0
+  LOCKDIR="/tmp/hivemind-milvus-start.lock"
+  START_SCRIPT="$SCRIPT_DIR/../start-milvus.sh"
+
+  if [[ -x "$START_SCRIPT" ]]; then
+    # Use mkdir as an atomic lock — only one agent starts Milvus at a time
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+      # We acquired the lock — start Milvus
+      "$START_SCRIPT" >> /tmp/hivemind-milvus-start.log 2>&1
+      rmdir "$LOCKDIR" 2>/dev/null
+    else
+      # Another agent is starting Milvus — wait for it to finish
+      while [[ -d "$LOCKDIR" ]]; do
+        sleep 1
+      done
+    fi
+
+    # After start attempt (or waiting for another agent's attempt), verify readiness
+    if ! milvus_ready; then
+      exit 0
+    fi
+  else
+    exit 0
+  fi
 fi
 
 # Current timestamp (Unix epoch)
