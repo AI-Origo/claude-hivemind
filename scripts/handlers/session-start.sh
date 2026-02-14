@@ -46,8 +46,11 @@ if [ -z "$WORKING_DIR" ] || [ -z "$SESSION_ID" ]; then
 fi
 
 # Coordination directory - search up for existing .hivemind, fall back to current dir
+# Track if .hivemind existed before this session (for purge-on-delete detection)
+HIVEMIND_EXISTED=true
 HIVEMIND_DIR=$(find_hivemind_dir "$WORKING_DIR")
 if [ -z "$HIVEMIND_DIR" ]; then
+  HIVEMIND_EXISTED=false
   HIVEMIND_DIRNAME="${HIVEMIND_DIRNAME:-.hivemind}"
   HIVEMIND_DIR="$WORKING_DIR/$HIVEMIND_DIRNAME"
 fi
@@ -62,6 +65,16 @@ PLUGIN_JSON="$PLUGIN_ROOT/.claude-plugin/plugin.json"
 if [[ -f "$PLUGIN_JSON" ]]; then
   VERSION=$(jq -r '.version // "unknown"' "$PLUGIN_JSON")
   echo "$VERSION" > "$HIVEMIND_DIR/version.txt"
+fi
+
+# If .hivemind didn't exist, purge stale project data and reinitialize collections
+if [[ "$HIVEMIND_EXISTED" == "false" ]] && milvus_ready 2>/dev/null; then
+  db_purge_project
+  # Reinitialize collections from project root
+  INIT_SCRIPT="$SCRIPT_DIR/../init-collections.sh"
+  if [[ -x "$INIT_SCRIPT" ]]; then
+    (cd "$(dirname "$HIVEMIND_DIR")" && "$INIT_SCRIPT") 2>/dev/null || true
+  fi
 fi
 
 # Check if Milvus is available - if not, exit silently (user should run start-milvus.sh)

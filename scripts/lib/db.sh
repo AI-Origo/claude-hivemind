@@ -501,6 +501,34 @@ db_full_init() {
     # Milvus collections are initialized separately via init-collections.sh
 }
 
+# Purge all Milvus collections for the current project and clean up temp files
+# Used when .hivemind is deleted to reset project state
+db_purge_project() {
+    local prefix
+    prefix=$(get_collection_prefix)
+
+    local result
+    result=$(curl -sf -X POST "${MILVUS_URL}/v2/vectordb/collections/list" \
+        -H "Authorization: Bearer ${MILVUS_AUTH}" \
+        -H "Content-Type: application/json" \
+        -d "{\"dbName\":\"${MILVUS_DB}\"}" 2>/dev/null) || return 0
+
+    local collections
+    collections=$(echo "$result" | jq -r '.data[]' 2>/dev/null | grep "^${prefix}_" || true)
+
+    [[ -z "$collections" ]] && return 0
+
+    while IFS= read -r col; do
+        [[ -z "$col" ]] && continue
+        curl -sf -X POST "${MILVUS_URL}/v2/vectordb/collections/drop" \
+            -H "Authorization: Bearer ${MILVUS_AUTH}" \
+            -H "Content-Type: application/json" \
+            -d "{\"dbName\":\"${MILVUS_DB}\",\"collectionName\":\"$col\"}" > /dev/null 2>&1 || true
+    done <<< "$collections"
+
+    rm -f /tmp/hivemind-status-* /tmp/hivemind-dir-* 2>/dev/null || true
+}
+
 # Clean up transient data (for session end)
 db_cleanup_transient() {
     local agent_name="$1"
