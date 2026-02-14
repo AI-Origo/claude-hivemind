@@ -134,6 +134,33 @@ if [[ $(echo "$message_ids" | jq 'length') -gt 0 ]]; then
   mark_messages_delivered "$message_ids"
 fi
 
+# Track delegation: if messages came from other agents, set delegated_by flag
+if [ -n "$MESSAGES" ]; then
+  SENDERS=""
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    sender=$(echo "$line" | jq -r '.from_agent // empty')
+    [[ -z "$sender" ]] && continue
+    if [ -z "$SENDERS" ]; then
+      SENDERS="$sender"
+    elif ! echo "$SENDERS" | grep -qw "$sender"; then
+      SENDERS="$SENDERS,$sender"
+    fi
+  done < <(echo "$messages_json" | jq -c '.[]' 2>/dev/null || echo "")
+
+  if [ -n "$SENDERS" ]; then
+    # Merge with existing delegated_by flag (don't overwrite)
+    existing=$(get_agent_flag "$AGENT_NAME" "delegated_by")
+    if [ -n "$existing" ]; then
+      for s in $(echo "$SENDERS" | tr ',' '\n'); do
+        echo "$existing" | grep -qw "$s" || existing="$existing,$s"
+      done
+      SENDERS="$existing"
+    fi
+    set_agent_flag "$AGENT_NAME" "delegated_by" "$SENDERS"
+  fi
+fi
+
 # Output messages if any
 if [ -n "$MESSAGES" ]; then
   echo "[HIVEMIND MESSAGES]"

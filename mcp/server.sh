@@ -524,7 +524,15 @@ tool_task() {
       local secs=$(( elapsed % 60 ))
       elapsed_str=" [${mins}m ${secs}s]"
     fi
-    text_result "Task cleared.${elapsed_str}"
+    # Check if this agent was delegated work by another agent
+    local delegated_by
+    delegated_by=$(get_agent_flag "$agent_name" "delegated_by")
+    local report_reminder=""
+    if [[ -n "$delegated_by" ]]; then
+      clear_agent_flag "$agent_name" "delegated_by"
+      report_reminder=" IMPORTANT: You received this task from agent(s): $delegated_by. Report your results back to them using hive_message before stopping."
+    fi
+    text_result "Task cleared.${elapsed_str}${report_reminder}"
   fi
 }
 

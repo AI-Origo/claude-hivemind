@@ -179,6 +179,32 @@ if [ -n "$AGENT_NAME" ]; then
   if [[ $(echo "$message_ids" | jq 'length') -gt 0 ]]; then
     mark_messages_delivered "$message_ids"
   fi
+
+  # Track delegation senders
+  if [ -n "$MESSAGES_OUTPUT" ]; then
+    SENDERS=""
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      sender=$(echo "$line" | jq -r '.from_agent // empty')
+      [[ -z "$sender" ]] && continue
+      if [ -z "$SENDERS" ]; then
+        SENDERS="$sender"
+      elif ! echo "$SENDERS" | grep -qw "$sender"; then
+        SENDERS="$SENDERS,$sender"
+      fi
+    done < <(echo "$messages_json" | jq -c '.[]' 2>/dev/null || echo "")
+
+    if [ -n "$SENDERS" ]; then
+      existing=$(get_agent_flag "$AGENT_NAME" "delegated_by")
+      if [ -n "$existing" ]; then
+        for s in $(echo "$SENDERS" | tr ',' '\n'); do
+          echo "$existing" | grep -qw "$s" || existing="$existing,$s"
+        done
+        SENDERS="$existing"
+      fi
+      set_agent_flag "$AGENT_NAME" "delegated_by" "$SENDERS"
+    fi
+  fi
 fi
 
 # Store for later output
