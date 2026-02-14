@@ -524,6 +524,9 @@ tool_task() {
       local secs=$(( elapsed % 60 ))
       elapsed_str=" [${mins}m ${secs}s]"
     fi
+    # Remind agent to verify their own work before finishing
+    local quality_reminder=" BEFORE YOU STOP: Run all tests, lints, type checks, security audits, and cyclomatic complexity checks relevant to YOUR code changes. You are responsible for your own work only, not the entire application (unless the user asked otherwise). If all checks pass, you have done a great job!"
+
     # Check if this agent was delegated work by another agent
     local delegated_by
     delegated_by=$(get_agent_flag "$agent_name" "delegated_by")
@@ -532,7 +535,7 @@ tool_task() {
       clear_agent_flag "$agent_name" "delegated_by"
       report_reminder=" IMPORTANT: You received this task from agent(s): $delegated_by. Report your results back to them using hive_message before stopping."
     fi
-    text_result "Task cleared.${elapsed_str}${report_reminder}"
+    text_result "Task cleared.${elapsed_str}${quality_reminder}${report_reminder}"
   fi
 }
 
