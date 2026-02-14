@@ -290,6 +290,15 @@ fi
 
 MSG="$MSG Use /hive status for coordination."
 
+# Load ALFA.md for agent alfa
+if [[ "$ASSIGNED_NAME" == "alfa" ]]; then
+  AGENT_FILE="$(dirname "$HIVEMIND_DIR")/ALFA.md"
+  if [[ -f "$AGENT_FILE" ]]; then
+    AGENT_FILE_CONTENT=$(<"$AGENT_FILE")
+    MSG="$MSG\n\n--- ALFA.md ---\n$AGENT_FILE_CONTENT\n--- end ALFA.md ---\n\nYou have been given instructions from ALFA.md. Acknowledge that you have read them."
+  fi
+fi
+
 # Escape for JSON
 MSG_ESCAPED=$(echo "$MSG" | sed 's/\\/\\\\/g; s/"/\\"/g; s/`/\\`/g')
 printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}' "$MSG_ESCAPED"
