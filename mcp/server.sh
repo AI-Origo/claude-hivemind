@@ -212,7 +212,7 @@ tool_whoami() {
 
 tool_agents() {
   if [[ "$HAS_MILVUS" != "true" ]]; then
-    text_result "Milvus not available. Run start-milvus.sh first."
+    text_result "Hivemind Milvus not available. Run hive_setup first."
     return
   fi
 
@@ -255,7 +255,7 @@ tool_agents() {
 
 tool_status() {
   if [[ "$HAS_MILVUS" != "true" ]]; then
-    text_result "Milvus not available. Run start-milvus.sh first."
+    text_result "Hivemind Milvus not available. Run hive_setup first."
     return
   fi
 
@@ -336,7 +336,7 @@ tool_message() {
   local msg_id="msg-$(date +%s)-$$-$RANDOM"
 
   if [[ "$HAS_MILVUS" != "true" ]]; then
-    text_result "Milvus not available. Run start-milvus.sh first."
+    text_result "Hivemind Milvus not available. Run hive_setup first."
     return
   fi
 
@@ -405,7 +405,7 @@ tool_message() {
 tool_inbox() {
   local session_id="$1" limit="$2" unread_only="$3" tty="$4"
 
-  [[ "$HAS_MILVUS" != "true" ]] && { text_result "Milvus not available."; return; }
+  [[ "$HAS_MILVUS" != "true" ]] && { text_result "Hivemind Milvus not available. Run hive_setup first."; return; }
 
   local agent_name=$(lookup_agent_name "$tty" "$session_id")
   [[ -z "$agent_name" ]] && { text_result "Agent not registered."; return; }
@@ -439,7 +439,7 @@ tool_task() {
   local session_id="$1" description="$2" tty="$3"
 
   if [[ "$HAS_MILVUS" != "true" ]]; then
-    text_result "Milvus not available. Run start-milvus.sh first."
+    text_result "Hivemind Milvus not available. Run hive_setup first."
     return
   fi
 
@@ -661,6 +661,13 @@ handle_tools_call() {
   # Resolve HIVEMIND_DIR for current TTY before any tool runs
   resolve_hivemind_dir
 
+  # Re-check Milvus availability if not yet detected (may have been started
+  # by session-start hook or another process since MCP server startup)
+  if [[ "$HAS_MILVUS" != "true" ]] && milvus_ready; then
+    HAS_MILVUS=true
+    log "Milvus now available (detected on tool call)"
+  fi
+
   local tool=$(echo "$line" | jq -r '.params.name')
   local args=$(echo "$line" | jq -r '.params.arguments // {}')
 
@@ -723,6 +730,12 @@ handle_tools_call() {
       ;;
     hive_setup)
       send_response "$id" "$(tool_setup)"
+      # tool_setup runs in a subshell (command substitution) so HAS_MILVUS
+      # changes are lost — re-check in the parent shell
+      if [[ "$HAS_MILVUS" != "true" ]] && milvus_ready; then
+        HAS_MILVUS=true
+        log "Milvus now available (after setup)"
+      fi
       ;;
     *) send_error "$id" "-32601" "Unknown tool: $tool" ;;
   esac
