@@ -83,14 +83,30 @@ if ! milvus_ready; then
   START_SCRIPT="$SCRIPT_DIR/../start-milvus.sh"
 
   if [[ -x "$START_SCRIPT" ]]; then
+    # Clean up stale lock (start-milvus.sh has 120s MAX_WAIT + 60s buffer)
+    if [[ -d "$LOCKDIR" ]]; then
+      lock_mtime=$(stat -f %m "$LOCKDIR" 2>/dev/null || stat -c %Y "$LOCKDIR" 2>/dev/null || echo "0")
+      if [[ $(( $(date +%s) - lock_mtime )) -gt 180 ]]; then
+        rmdir "$LOCKDIR" 2>/dev/null || true
+      fi
+    fi
+
     # Use mkdir as an atomic lock — only one agent starts Milvus at a time
     if mkdir "$LOCKDIR" 2>/dev/null; then
+      # Release lock on exit (crash, signal, or normal return)
+      trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
       # We acquired the lock — start Milvus
       "$START_SCRIPT" >> /tmp/hivemind-milvus-start.log 2>&1
       rmdir "$LOCKDIR" 2>/dev/null
+      trap - EXIT
     else
-      # Another agent is starting Milvus — wait for it to finish
+      # Another agent is starting Milvus — wait with timeout
+      lock_wait_start=$(date +%s)
       while [[ -d "$LOCKDIR" ]]; do
+        if [[ $(( $(date +%s) - lock_wait_start )) -gt 180 ]]; then
+          rmdir "$LOCKDIR" 2>/dev/null || true
+          break
+        fi
         sleep 1
       done
     fi

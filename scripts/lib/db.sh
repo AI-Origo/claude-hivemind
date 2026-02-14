@@ -59,7 +59,7 @@ milvus_post() {
 
     while [[ $attempt -lt $max_retries ]]; do
         local response
-        response=$(curl -sf -X POST "${MILVUS_URL}${endpoint}" \
+        response=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "${MILVUS_URL}${endpoint}" \
             -H "Authorization: Bearer ${MILVUS_AUTH}" \
             -H "Content-Type: application/json" \
             -d "$data" 2>>"$db_log")
@@ -100,7 +100,7 @@ milvus_post() {
 # Health check
 # Returns: 0 if healthy, 1 if not
 milvus_health() {
-    curl -sf "http://${MILVUS_HOST}:${HEALTH_PORT:-9092}/healthz" > /dev/null 2>&1
+    curl -sf --connect-timeout 3 --max-time 5 "http://${MILVUS_HOST}:${HEALTH_PORT:-9092}/healthz" > /dev/null 2>&1
 }
 
 # Check if Milvus is available and collections are initialized
@@ -508,7 +508,7 @@ db_purge_project() {
     prefix=$(get_collection_prefix)
 
     local result
-    result=$(curl -sf -X POST "${MILVUS_URL}/v2/vectordb/collections/list" \
+    result=$(curl -sf --connect-timeout 5 --max-time 10 -X POST "${MILVUS_URL}/v2/vectordb/collections/list" \
         -H "Authorization: Bearer ${MILVUS_AUTH}" \
         -H "Content-Type: application/json" \
         -d "{\"dbName\":\"${MILVUS_DB}\"}" 2>/dev/null) || return 0
@@ -520,7 +520,7 @@ db_purge_project() {
 
     while IFS= read -r col; do
         [[ -z "$col" ]] && continue
-        curl -sf -X POST "${MILVUS_URL}/v2/vectordb/collections/drop" \
+        curl -sf --connect-timeout 5 --max-time 10 -X POST "${MILVUS_URL}/v2/vectordb/collections/drop" \
             -H "Authorization: Bearer ${MILVUS_AUTH}" \
             -H "Content-Type: application/json" \
             -d "{\"dbName\":\"${MILVUS_DB}\",\"collectionName\":\"$col\"}" > /dev/null 2>&1 || true

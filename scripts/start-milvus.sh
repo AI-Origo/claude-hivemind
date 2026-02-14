@@ -43,7 +43,7 @@ echo "Waiting for Milvus to be healthy..."
 # Wait for health endpoint
 start_time=$(date +%s)
 while true; do
-  if curl -sf "http://${MILVUS_HOST}:${HEALTH_PORT}/healthz" > /dev/null 2>&1; then
+  if curl -sf --connect-timeout 3 --max-time 5 "http://${MILVUS_HOST}:${HEALTH_PORT}/healthz" > /dev/null 2>&1; then
     echo "Milvus is healthy!"
     break
   fi
@@ -63,7 +63,7 @@ done
 echo "Waiting for API to be ready..."
 start_time=$(date +%s)
 while true; do
-  if curl -sf -X POST "http://${MILVUS_HOST}:${MILVUS_PORT}/v2/vectordb/collections/list" \
+  if curl -sf --connect-timeout 3 --max-time 5 -X POST "http://${MILVUS_HOST}:${MILVUS_PORT}/v2/vectordb/collections/list" \
       -H "Authorization: Bearer root:Milvus" \
       -H "Content-Type: application/json" \
       -d '{"dbName":"default"}' > /dev/null 2>&1; then
