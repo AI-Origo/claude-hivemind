@@ -177,7 +177,7 @@ render_dashboard() {
   echo -e "${V_LINE} $(draw_line "${H_LINE}" | head -c $((width - 4)))${EOL}"
 
   # List recent tasks (not done)
-  local tasks=$(milvus_query "tasks" "state != \"done\"" "seq_id,title,state,assignee" 100)
+  local tasks=$(milvus_query "tasks" "(state == \"claimed\" or state == \"in_progress\")" "seq_id,title,state,assignee" 100)
   tasks=$(echo "$tasks" | jq -c 'sort_by(.seq_id) | .[:5]')
 
   while IFS= read -r line; do
