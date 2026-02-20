@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.8.0](https://github.com/AI-Origo/claude-hivemind/compare/v1.7.1...v1.8.0) (2026-02-14)
+
+
+### Features
+
+* load ALFA.md into agent alfa's startup context ([adbe74f](https://github.com/AI-Origo/claude-hivemind/commit/adbe74f))
+
+
+## [1.7.1](https://github.com/AI-Origo/claude-hivemind/compare/v1.7.0...v1.7.1) (2026-02-14)
+
+
+### Bug Fixes
+
+* make Milvus resilient — restart policies, curl timeouts, stale lock cleanup ([9206f30](https://github.com/AI-Origo/claude-hivemind/commit/9206f30))
+
+
+## [1.7.0](https://github.com/AI-Origo/claude-hivemind/compare/v1.6.0...v1.7.0) (2026-02-14)
+
+
+### Features
+
+* remind agents to run quality checks before finishing ([afc6525](https://github.com/AI-Origo/claude-hivemind/commit/afc6525))
+
+
+## [1.6.0](https://github.com/AI-Origo/claude-hivemind/compare/v1.5.1...v1.6.0) (2026-02-14)
+
+
+### Features
+
+* remind delegated agents to report back on task completion ([a97d8df](https://github.com/AI-Origo/claude-hivemind/commit/a97d8df))
+
+
+## [1.5.1](https://github.com/AI-Origo/claude-hivemind/compare/v1.5.0...v1.5.1) (2026-02-14)
+
+
+### Bug Fixes
+
+* HAS_MILVUS lost in subshell after hive_setup starts Milvus ([ca479f3](https://github.com/AI-Origo/claude-hivemind/commit/ca479f3))
+
+
+## [1.5.0](https://github.com/AI-Origo/claude-hivemind/compare/v1.4.0...v1.5.0) (2026-02-14)
+
+
+### Features
+
+* auto-start Milvus on first agent session ([f7f1210](https://github.com/AI-Origo/claude-hivemind/commit/f7f1210))
+
+
+## [1.4.0](https://github.com/AI-Origo/claude-hivemind/compare/v1.3.0...v1.4.0) (2026-02-14)
+
+
+### Features
+
+* auto-purge project data when .hivemind is deleted ([dca761c](https://github.com/AI-Origo/claude-hivemind/commit/dca761c))
+
+
+### Documentation
+
+* update changelog with all releases from 0.11.0 through 1.3.0 ([1e1e4d5](https://github.com/AI-Origo/claude-hivemind/commit/1e1e4d5))
+
+
 ## [1.3.0](https://github.com/AI-Origo/claude-hivemind/compare/v1.2.2...v1.3.0) (2026-02-14)
 
 

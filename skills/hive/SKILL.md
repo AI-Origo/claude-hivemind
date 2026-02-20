@@ -10,9 +10,9 @@ All Hivemind commands are available as MCP tools. When the user runs `/hive <com
 ## First-Time Setup
 
 Run `/hive setup` to configure your environment:
+- Starts Milvus if not already running
+- Initializes database collections
 - Configures status line to show agent name and current task
-
-Note: Milvus must be running first via `./scripts/start-milvus.sh`
 
 ## Command Mapping
 
@@ -26,6 +26,9 @@ Note: Milvus must be running first via `./scripts/start-milvus.sh`
 | `/hive message <target> <text>` | `hive_message` with `target` and `body` |
 | `/hive changes [n]` | `hive_changes` with optional `count` |
 | `/hive task [description]` | `hive_task` with optional `description` |
+| `/hive inbox [n]` | `hive_inbox` with optional `limit` |
+| `/hive read_message <id>` | `hive_read_message` with `id` |
+| `/hive clean_inbox` | `hive_clean_inbox` |
 
 ## Instructions
 
@@ -39,6 +42,9 @@ Parse `$ARGUMENTS` and call the corresponding MCP tool:
 6. If `message <target> <text>`: Call `hive_message` with `{"target": "<target>", "body": "<text>"}`
 7. If `changes [n]`: Call `hive_changes` with `{"count": n}` (default 20)
 8. If `task [description]`: Call `hive_task` with `{"description": "<description>"}` (empty to clear)
+9. If `inbox [n]`: Call `hive_inbox` with `{"limit": n}` (default 10)
+10. If `read_message <id>`: Call `hive_read_message` with `{"id": "<id>"}`
+11. If `clean_inbox`: Call `hive_clean_inbox`
 
 The MCP tools handle all coordination logic.
 
@@ -78,3 +84,23 @@ The MCP tools handle all coordination logic.
 /hive changes 10
 ```
 -> Call `hive_changes` with `{"count": 10}`
+
+```
+/hive inbox
+```
+-> Call `hive_inbox`
+
+```
+/hive inbox 5
+```
+-> Call `hive_inbox` with `{"limit": 5}`
+
+```
+/hive read_message msg-1708963200-12345-6789
+```
+-> Call `hive_read_message` with `{"id": "msg-1708963200-12345-6789"}`
+
+```
+/hive clean_inbox
+```
+-> Call `hive_clean_inbox`

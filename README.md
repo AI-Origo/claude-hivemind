@@ -55,31 +55,25 @@ Alternatively, the first time the wake feature runs, macOS will prompt you to al
 claude --plugin-dir /path/to/hivemind
 ```
 
-### 3. Start Milvus
-
-```bash
-./path/to/hivemind/scripts/start-milvus.sh
-```
-
-This starts the Milvus containers via Docker Compose. The first run may take a minute to download images.
-
-### 4. Run Setup
+### 3. Run Setup
 
 ```
 /hive setup
 ```
 
-This configures the status line to show your agent name and current task. Collections are auto-initialized on first use.
+This starts Milvus (if not already running), initializes database collections, and configures the status line to show your agent name and current task.
 
 Restart Claude Code after setup completes.
 
-### 5. Run your first command
+> **Note:** Milvus is also auto-started on agent session start if it isn't running. You can still start it manually with `./path/to/hivemind/scripts/start-milvus.sh` if needed.
+
+### 4. Run your first command
 
 ```
 /hive help
 ```
 
-### 6. Add to `.gitignore`
+### 5. Add to `.gitignore`
 
 ```
 .hivemind/
@@ -93,9 +87,11 @@ Hivemind enables multiple Claude Code agents to work together on the same codeba
 - **Automatic agent registration** - Each session gets a unique phonetic codename (alfa, bravo, charlie...)
 - **Inter-agent messaging** - Send direct messages or broadcast to all agents
 - **Agent wake-up** - Idle agents are automatically woken when they receive a message (macOS + iTerm2)
-- **Task visibility** - Set your current task so other agents know what you're working on
+- **Task management** - Full task lifecycle with enforcement, elapsed time tracking, and quality reminders
+- **Delegation protocol** - Structured delegation with automatic reporting reminders
 - **File change logging** - See who changed what and when
 - **Conflict warnings** - Advisory warnings when editing files another agent is working on
+- **Auto-start Milvus** - Database starts automatically on first agent session
 - **Observability dashboard** - Terminal UI showing agents and metrics
 
 ## Commands Reference
@@ -116,6 +112,8 @@ All commands are available via the `/hive` slash command or by calling the MCP t
 | `/hive changes` | `hive_changes` | View last 20 file changes |
 | `/hive changes <n>` | `hive_changes` | View last n changes |
 | `/hive inbox` | `hive_inbox` | View your message history |
+| `/hive read_message <id>` | `hive_read_message` | Read full content of a truncated message |
+| `/hive clean_inbox` | `hive_clean_inbox` | Remove all read messages from your inbox |
 
 ## Dashboard
 
@@ -143,46 +141,17 @@ Controls: `q` to quit, `r` to refresh
 ```
 > /hive help
 
-HIVEMIND COMMANDS
-=================
-
-hive_setup
-  First-time setup: starts Milvus and configures status line
-  Run this once when starting with Hivemind
-
-hive_whoami
-  Get my agent identity (no parameters)
-
-hive_agents
-  List all active agents (no parameters)
-
-hive_status
-  Show coordination dashboard (no parameters)
-
-hive_message
-  Send message to another agent or broadcast
-  Parameters:
-    target (required) - Agent name (alfa, bravo, etc.) or "all" for broadcast
-    body (required)   - Message content
-
-hive_task
-  Set or clear my current task
-  Parameters:
-    description (optional) - Task description, omit or empty to clear
-
-hive_changes
-  View recent file changes
-  Parameters:
-    count (optional) - Number of changes to show (default 20)
-
-hive_inbox
-  View your message history
-  Parameters:
-    limit (optional) - Maximum messages to return (default 10)
-    unread_only (optional) - Only show undelivered messages (default false)
-
-hive_help
-  Show this help (no parameters)
+hive_setup - First-time setup (starts Milvus, configures status line)
+hive_whoami - Get your agent name
+hive_agents - List active agents and their tasks
+hive_status - Coordination dashboard (agents, locks, recent changes)
+hive_message target=<name|all> body=<text> - Send message to agent or broadcast
+hive_task description=<text> - Set current task (empty to clear)
+hive_changes count=<n> - View recent file changes (default 20)
+hive_inbox limit=<n> unread_only=<bool> - View message history (long messages truncated)
+hive_read_message id=<msg_id> - Read full content of a truncated message
+hive_clean_inbox - Remove all read messages from your inbox
+Messages from other agents are delivered automatically each prompt.
 ```
 
 ### `/hive whoami` - Agent Identity
@@ -286,8 +255,8 @@ Messages are delivered automatically when you submit a prompt. You'll see them a
 
 ```
 [HIVEMIND MESSAGES]
-[HIVE AGENT MESSAGE] From bravo (2025-01-22T14:35:00Z): Hey, can you check the auth tests when you're done?
-[BROADCAST] [HIVE AGENT MESSAGE] From charlie (2025-01-22T14:36:00Z): Pushing to main in 5 minutes
+[HIVE AGENT MESSAGE] From bravo (2026-02-14T14:35:00Z): Hey, can you check the auth tests when you're done?
+[BROADCAST] [HIVE AGENT MESSAGE] From charlie (2026-02-14T14:36:00Z): Pushing to main in 5 minutes
 ```
 
 Messages are consumed after delivery.
@@ -321,8 +290,32 @@ Check your recent messages:
 > /hive inbox
 
 Your recent messages:
-From bravo (2025-01-22T14:35:00Z): Hey, can you check the auth tests when you're done?
-[UNREAD] From charlie (2025-01-22T14:40:00Z): Found a bug in the login flow
+From bravo (2026-02-14T14:35:00Z): Hey, can you check the auth tests when you're done?
+[UNREAD] From charlie (2026-02-14T14:40:00Z): Found a bug in the login flow
+```
+
+Long messages (over 200 characters) are truncated with a hint to read the full content:
+```
+[UNREAD] From bravo (2026-02-14T15:00:00Z): Here's the full error trace from... [use hive_read_message id=msg-123 to read full message]
+```
+
+### `/hive read_message` - Read Full Message
+
+Read the full content of a truncated message:
+```
+> /hive read_message msg-1708963200-12345-6789
+
+From bravo (2026-02-14T15:00:00Z):
+Here's the full error trace from the auth module...
+```
+
+### `/hive clean_inbox` - Clean Up Read Messages
+
+Remove all delivered (read) messages from your inbox:
+```
+> /hive clean_inbox
+
+Cleaned inbox: removed 5 read message(s).
 ```
 
 ### `/hive changes` - View File Change History
@@ -356,16 +349,17 @@ This is an advisory warning - the edit is not blocked, but you should coordinate
 
 ### Architecture Overview
 
-Hivemind is a Claude Code plugin with three components:
+Hivemind is a Claude Code plugin with these components:
 
-1. **MCP Server** (`mcp/server.sh`) - Provides tools: `hive_whoami`, `hive_agents`, `hive_status`, `hive_message`, `hive_task`, `hive_changes`, `hive_inbox`, `hive_help`, `hive_setup`
+1. **MCP Server** (`mcp/server.sh`) - Provides tools: `hive_whoami`, `hive_agents`, `hive_status`, `hive_message`, `hive_task`, `hive_changes`, `hive_inbox`, `hive_read_message`, `hive_clean_inbox`, `hive_help`, `hive_setup`
 
 2. **Hooks** (`hooks/hooks.json`) - Intercept session and tool events:
-   - `SessionStart` - Register agent, initialize database
-   - `SessionEnd` - Mark agent ended, release locks
+   - `SessionStart` - Register agent, initialize database, auto-start Milvus
+   - `SessionEnd` - Mark agent ended, release locks, complete active tasks
    - `UserPromptSubmit` - Deliver messages, task reminders
-   - `PreToolUse` - File lock warnings, session ID injection
-   - `PostToolUse` - Changelog entry, release locks
+   - `PreToolUse` - File lock warnings, session ID injection, task enforcement
+   - `PostToolUse` - Changelog entry, release locks, set awaiting_task flag
+   - `Stop` - Agent cleanup
 
 3. **Skill** (`skills/hive/SKILL.md`) - Maps `/hive` commands to MCP tools
 
@@ -386,21 +380,27 @@ All data is stored in Milvus, a vector database running via Docker:
 **Ports:**
 - `19531` - Milvus REST API
 - `9092` - Health check endpoint
-- `8083` - Optional Attu UI (if enabled)
+- `8083` - Attu UI (only starts with `--profile ui`)
 
 **Collections:**
 ```
 -- Core coordination (placeholder 8-dim vectors)
-{project}_hivemind_agents         -- Agent registration and status
-{project}_hivemind_file_locks     -- Advisory file locks
-{project}_hivemind_messages       -- Inter-agent messages
-{project}_hivemind_changelog      -- File change history
-{project}_hivemind_metrics        -- Event metrics for dashboard
-{project}_hivemind_context_injections -- Token budget tracking
-{project}_hivemind_wake_queue     -- Agent wakeup queue
+{project}_hivemind_agents              -- Agent registration and status
+{project}_hivemind_file_locks          -- Advisory file locks
+{project}_hivemind_messages            -- Inter-agent messages
+{project}_hivemind_changelog           -- File change history
+{project}_hivemind_metrics             -- Event metrics for dashboard
+{project}_hivemind_context_injections  -- Token budget tracking
+{project}_hivemind_wake_queue          -- Agent wakeup queue
+
+-- Vector collections (3072-dim for semantic search)
+{project}_hivemind_tasks               -- Task queue with semantic search
+{project}_hivemind_knowledge           -- Knowledge base with embeddings
+{project}_hivemind_memory              -- Key-value store with embeddings
+{project}_hivemind_decisions           -- Decision log with embeddings
 
 -- Sequences
-{project}_hivemind_sequences      -- Auto-increment IDs
+{project}_hivemind_sequences           -- Auto-increment IDs
 ```
 
 Collections are prefixed with the project name (e.g., `myproject_hivemind_agents`) to allow multiple projects to share the same Milvus instance.
@@ -408,11 +408,14 @@ Collections are prefixed with the project name (e.g., `myproject_hivemind_agents
 ### Agent Lifecycle
 
 **SessionStart:**
-1. Checks if session ID already has an agent assigned
-2. If not, checks for TTY-based recovery (same terminal reuses existing agent)
-3. If no existing agent, finds first available phonetic codename (alfa, bravo, charlie...)
-4. Creates/updates agent record in database
-5. Shows other active agents and assigned tasks
+1. Auto-starts Milvus if not running (with lock to prevent concurrent starts)
+2. Auto-purges project data if `.hivemind` was deleted
+3. Checks if session ID already has an agent assigned
+4. If not, checks for TTY-based recovery (same terminal reuses existing agent)
+5. If no existing agent, finds first available phonetic codename (alfa, bravo, charlie...)
+6. Creates/updates agent record in database
+7. Shows other active agents, assigned tasks, and tasks in review
+8. Loads `ALFA.md` for agent alfa (if present in project root)
 
 **TTY-Based Identity:**
 
@@ -421,8 +424,9 @@ Agent identity is tracked by TTY (terminal device path) in addition to session I
 **SessionEnd:**
 1. Looks up codename using TTY-first lookup
 2. Marks agent as ended in database (preserves for TTY recovery)
-3. Releases file locks held by this agent
-4. Cleans up old delivered messages
+3. Completes all active tasks for this agent
+4. Releases file locks held by this agent
+5. Cleans up messages to and from this agent
 
 ### Message Delivery
 
@@ -443,6 +447,53 @@ Agent identity is tracked by TTY (terminal device path) in addition to session I
 **PostToolUse (Write/Edit):**
 1. Appends entry to changelog
 2. Releases file lock
+
+### Task Management
+
+Hivemind includes a task tracking system backed by a vector collection with semantic search support:
+
+- **Task lifecycle:** pending → claimed → in_progress → review → done (or rejected)
+- **Auto-completion:** When an agent clears their task (`hive_task` with no description), all in_progress tasks for that agent are marked as done
+- **Session cleanup:** When an agent's session ends, active tasks are completed automatically
+- **Elapsed time:** Clearing a task shows how long it was active
+- **Quality reminders:** On task clear, agents are reminded to run tests, lints, and checks on their changes
+
+### Task Enforcement (Delegation Protocol)
+
+To ensure agents always report what they're working on:
+
+1. After `ExitPlanMode`, the `PostToolUse` hook sets an `awaiting_task` flag on the agent
+2. The `PreToolUse` hook checks this flag — if set and the agent tries to use any tool other than `hive_task`, the tool call is **denied** with a message requiring the agent to set a task first
+3. Once `hive_task` is called, the flag is cleared and normal operation resumes
+
+This prevents agents from starting work after accepting a plan without recording their task for visibility.
+
+### Delegation Guidance
+
+When an agent exits plan mode, Hivemind provides contextual guidance:
+
+- Shows which agents are currently active and what they're working on (to avoid duplicating effort)
+- Lists idle agents available for delegation
+- Provides delegation rules: delegate early, one task at a time, include context
+- Tracks delegation via a `delegated_by` flag — when a delegated agent clears their task, they are reminded to report back to the delegating agent
+
+### ALFA.md Loading
+
+When agent `alfa` starts a session, Hivemind checks for an `ALFA.md` file in the project root (next to `.hivemind/`). If found, its contents are injected into alfa's startup context. This allows project-specific instructions to be given to the lead agent.
+
+### Auto-Start Milvus
+
+On `SessionStart`, if Milvus is not running, Hivemind automatically starts it using `scripts/start-milvus.sh`. A lock file (`/tmp/hivemind-milvus-start.lock`) prevents multiple agents from starting Milvus simultaneously.
+
+### Auto-Purge on .hivemind Removal
+
+If the `.hivemind` directory doesn't exist when a session starts (e.g., it was deleted or the project was freshly cloned), Hivemind purges all stale project data from Milvus and reinitializes collections. This ensures a clean slate without manual intervention.
+
+### Message Truncation
+
+Messages over 200 characters are truncated in `hive_inbox` output with a hint to use `hive_read_message` for the full content. This keeps inbox output readable when agents send long messages (e.g., error traces or code snippets).
+
+Delivered messages older than 1 minute are automatically cleaned up on inbox access.
 
 ### Directory Structure
 
