@@ -225,7 +225,7 @@ tool_agents() {
       [[ -z "$line" ]] && continue
       local name=$(echo "$line" | jq -r '.name')
       # Check tasks collection for in_progress tasks
-      local agent_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$name") and state == \"in_progress\"" "seq_id,title" 5)
+      local agent_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$name") and state == \"in_progress\"" "seq_id,title" 100)
       local task_str=""
       while IFS= read -r tline; do
         [[ -z "$tline" ]] && continue
@@ -267,7 +267,7 @@ tool_status() {
       [[ -z "$line" ]] && continue
       local name=$(echo "$line" | jq -r '.name')
       # Check tasks collection for in_progress tasks
-      local agent_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$name") and state == \"in_progress\"" "seq_id,title" 5)
+      local agent_tasks=$(milvus_query "tasks" "assignee == $(db_quote "$name") and state == \"in_progress\"" "seq_id,title" 100)
       local task_str=""
       while IFS= read -r tline; do
         [[ -z "$tline" ]] && continue
@@ -312,7 +312,7 @@ tool_status() {
   fi
 
   # Recent changes
-  local changes_json=$(get_recent_changelog 5)
+  local changes_json=$(get_recent_changelog 100)
 
   if [[ -n "$changes_json" && "$changes_json" != "[]" ]]; then
     output+="Recent changes:\n"
@@ -411,6 +411,10 @@ tool_inbox() {
   [[ -z "$agent_name" ]] && { text_result "Agent not registered."; return; }
 
   limit=${limit:-10}
+
+  # Delete delivered messages older than 1 minute on demand
+  cleanup_stale_messages
+
   local filter="to_agent == $(db_quote "$agent_name")"
   [[ "$unread_only" == "true" ]] && filter="$filter and delivered_at == 0"
 
@@ -423,15 +427,61 @@ tool_inbox() {
     # Sort by created_at descending
     messages=$(echo "$messages" | jq -c 'sort_by(-.created_at)')
     while IFS= read -r msg; do
+      local msg_id=$(echo "$msg" | jq -r '.id')
       local from=$(echo "$msg" | jq -r '.from_agent')
       local body=$(echo "$msg" | jq -r '.body')
       local ts_epoch=$(echo "$msg" | jq -r '.created_at // 0')
       local time=$(epoch_to_iso "$ts_epoch")
       local delivered_at=$(echo "$msg" | jq -r '.delivered_at // 0')
-      local status=$([[ "$delivered_at" == "0" ]] && echo "[UNREAD]" || echo "")
-      output+="$status From $from ($time): $body\n"
+      local status=$([[ "$delivered_at" == "0" ]] && echo "[UNREAD] " || echo "")
+      # Truncate long messages with read-more hint
+      local truncated=""
+      if [[ ${#body} -gt 200 ]]; then
+        body="${body:0:200}..."
+        truncated=" [use hive_read_message id=$msg_id to read full message]"
+      fi
+      output+="${status}From $from ($time): $body${truncated}\n"
     done < <(echo "$messages" | jq -c '.[]')
     text_result "$output"
+  fi
+}
+
+tool_read_message() {
+  local msg_id="$1"
+
+  [[ "$HAS_MILVUS" != "true" ]] && { text_result "Hivemind Milvus not available. Run hive_setup first."; return; }
+  [[ -z "$msg_id" ]] && { text_result "Message ID is required."; return; }
+
+  local msg=$(milvus_query "messages" "id == $(db_quote "$msg_id")" "*" 1)
+
+  if [[ -z "$msg" || "$msg" == "[]" ]]; then
+    text_result "Message not found."
+  else
+    local from=$(echo "$msg" | jq -r '.[0].from_agent')
+    local body=$(echo "$msg" | jq -r '.[0].body')
+    local ts_epoch=$(echo "$msg" | jq -r '.[0].created_at // 0')
+    local time=$(epoch_to_iso "$ts_epoch")
+    text_result "From $from ($time):\n$body"
+  fi
+}
+
+tool_clean_inbox() {
+  local session_id="$1" tty="$2"
+
+  [[ "$HAS_MILVUS" != "true" ]] && { text_result "Hivemind Milvus not available. Run hive_setup first."; return; }
+
+  local agent_name=$(lookup_agent_name "$tty" "$session_id")
+  [[ -z "$agent_name" ]] && { text_result "Agent not registered."; return; }
+
+  local filter="to_agent == $(db_quote "$agent_name") and delivered_at > 0"
+  local read_msgs=$(milvus_query "messages" "$filter" "id" 100)
+  local count=$(echo "$read_msgs" | jq 'length')
+
+  if [[ "$count" -eq 0 ]]; then
+    text_result "Inbox already clean — no read messages to remove."
+  else
+    milvus_delete "messages" "$filter"
+    text_result "Cleaned inbox: removed $count read message(s)."
   fi
 }
 
@@ -575,7 +625,9 @@ hive_status - Coordination dashboard (agents, locks, recent changes)
 hive_message target=<name|all> body=<text> - Send message to agent or broadcast
 hive_task description=<text> - Set current task (empty to clear)
 hive_changes count=<n> - View recent file changes (default 20)
-hive_inbox limit=<n> unread_only=<bool> - View message history
+hive_inbox limit=<n> unread_only=<bool> - View message history (long messages truncated)
+hive_read_message id=<msg_id> - Read full content of a truncated message
+hive_clean_inbox - Remove all read messages from your inbox
 Messages from other agents are delivered automatically each prompt."
 }
 
@@ -660,7 +712,9 @@ handle_tools_list() {
     {"name":"hive_message","description":"Send a message to another agent or broadcast to all agents","inputSchema":{"type":"object","properties":{"target":{"type":"string","description":"Agent name (alfa, bravo, etc.) or \"all\" for broadcast"},"body":{"type":"string","description":"Message content"}},"required":["target","body"]}},
     {"name":"hive_task","description":"Set or clear your current task (visible to other agents in status)","inputSchema":{"type":"object","properties":{"description":{"type":"string","description":"Task description (omit or empty string to clear)"}},"required":[]}},
     {"name":"hive_changes","description":"View recent file changes made by all agents","inputSchema":{"type":"object","properties":{"count":{"type":"integer","description":"Number of changes to show (default 20)"}},"required":[]}},
-    {"name":"hive_inbox","description":"View your message history. Returns recent messages you have received.","inputSchema":{"type":"object","properties":{"limit":{"type":"number","description":"Maximum messages to return (default: 10)"},"unread_only":{"type":"boolean","description":"Only show undelivered messages (default: false)"}},"required":[]}},
+    {"name":"hive_inbox","description":"View your message history. Returns recent messages you have received. Long messages are truncated — use hive_read_message to read the full content.","inputSchema":{"type":"object","properties":{"limit":{"type":"number","description":"Maximum messages to return (default: 10)"},"unread_only":{"type":"boolean","description":"Only show undelivered messages (default: false)"}},"required":[]}},
+    {"name":"hive_read_message","description":"Read the full content of a message by its ID. Use this when a message was truncated in hive_inbox.","inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Message ID to read"}},"required":["id"]}},
+    {"name":"hive_clean_inbox","description":"Remove all read messages from your inbox. Unread messages are kept.","inputSchema":{"type":"object","properties":{},"required":[]}},
     {"name":"hive_help","description":"Show Hivemind command reference. Display the full output to the user as-is.","inputSchema":{"type":"object","properties":{},"required":[]}},
     {"name":"hive_setup","description":"Set up Hivemind: checks Milvus and configures status line. Run this first when using Hivemind in a new project.","inputSchema":{"type":"object","properties":{},"required":[]}}
   ]}'
@@ -738,6 +792,18 @@ handle_tools_call() {
         tty=$(derive_tty)
       fi
       send_response "$id" "$(tool_inbox "$sid" "$limit" "$unread_only" "$tty")"
+      ;;
+    hive_read_message)
+      local msg_id=$(echo "$args" | jq -r '.id // ""')
+      send_response "$id" "$(tool_read_message "$msg_id")"
+      ;;
+    hive_clean_inbox)
+      local sid=$(echo "$args" | jq -r '.session_id // ""')
+      local tty=$(echo "$args" | jq -r '.tty // ""')
+      if [[ -z "$sid" && -z "$tty" ]]; then
+        tty=$(derive_tty)
+      fi
+      send_response "$id" "$(tool_clean_inbox "$sid" "$tty")"
       ;;
     hive_setup)
       send_response "$id" "$(tool_setup)"

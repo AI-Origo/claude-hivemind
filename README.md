@@ -493,7 +493,7 @@ If the `.hivemind` directory doesn't exist when a session starts (e.g., it was d
 
 Messages over 200 characters are truncated in `hive_inbox` output with a hint to use `hive_read_message` for the full content. This keeps inbox output readable when agents send long messages (e.g., error traces or code snippets).
 
-Delivered messages older than 1 minute are automatically cleaned up on inbox access.
+Delivered messages older than 5 minutes are automatically cleaned up on inbox access.
 
 ### Directory Structure
 

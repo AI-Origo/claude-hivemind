@@ -548,9 +548,8 @@ db_cleanup_transient() {
         # This is handled in session-end.sh directly
     fi
 
-    # Clean up delivered messages older than 24 hours
-    local cutoff=$(($(get_timestamp) - 86400))
-    milvus_delete "messages" "delivered_at > 0 and delivered_at < $cutoff"
+    # Clean up delivered messages older than 5 minutes
+    cleanup_stale_messages
 }
 
 # ============================================================================
@@ -632,6 +631,12 @@ insert_message() {
         '[{id:$id,from_agent:$from_agent,to_agent:$to_agent,body:$body,priority:$priority,created_at:$created_at,delivered_at:$delivered_at,embedding:$embedding}]')
 
     milvus_insert "messages" "$data"
+}
+
+# Delete delivered messages older than 5 minutes (on-demand cleanup)
+cleanup_stale_messages() {
+    local cutoff=$(($(get_timestamp) - 300))
+    milvus_delete "messages" "delivered_at > 0 and delivered_at < $cutoff"
 }
 
 # Get pending messages for an agent
