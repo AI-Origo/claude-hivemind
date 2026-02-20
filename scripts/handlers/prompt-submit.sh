@@ -209,7 +209,7 @@ echo "[HIVEMIND TASK TRACKING]"
 
 if [ -n "$TASK_REMINDER" ]; then
   echo "You are agent $AGENT_NAME. Active tasks: $TASK_REMINDER"
-  echo "If the user's message changes what you're working on, call hive_task with a short description of the new activity. Only clear your task (empty description) when the work is fully complete and you have nothing left to do."
+  echo "If the user's message changes what you're working on, call hive_task with a short description of the new activity. Your task is auto-cleared when a run completes."
 else
   echo "You are agent $AGENT_NAME. You have no active task. IMPORTANT: Your very first action must be to call hive_task with a short description of what you're about to do. Do this before any other tool call. Keep it set across turns until the work is fully complete, then clear it (empty description). Never set it to 'idle' or 'waiting'."
 fi
